@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "khan-interactive-data-analysis",
+  "description": "Interactive Excel and CSV cleaning and business analysis skill with confirmation gates, checkpoint rollbacks, and rerunnable sessions.",
+  "plugins": [
+    {
+      "name": "khan-interactive-data-analysis",
+      "description": "End-to-end Excel/CSV cleaning and business analysis workflow with confirmation gates, session state, and rerun support.",
+      "source": "./plugins/khan-interactive-data-analysis",
+      "category": "productivity",
+      "tags": ["excel", "csv", "cleaning", "analysis", "business", "anomaly", "workflow"]
+    }
+  ]
+}
