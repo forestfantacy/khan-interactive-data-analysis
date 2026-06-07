@@ -49,7 +49,8 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/clean_tabular_da
 - 字段表头行
 - 双语 / 系统字段表头行
 - 数据起止行
-- 合计 / 备注 / 说明尾行
+- 合计 / 备注 / 说明 / 签字等排除候选行
+- 每条候选的来源行、命中内容、判定依据、建议动作和候选 ID
 - 置信度与证据
 - 按 Tab 名分组的跨文件表头一致性
 - 每个来源文件 / Tab 的实际数据行数
@@ -64,7 +65,7 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/clean_tabular_da
 - 使用哪一行作为最终字段名
 - 双语表头是否跳过
 - 数据区起止行是否合理
-- 是否排除合计 / 备注 / 说明行
+- 每条排除候选是保留还是排除
 - 是否增加追溯字段
 - 同名 Tab 是否合并
 
@@ -85,17 +86,29 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/clean_tabular_da
 - 数据区不连续且无法判断是否应保留
 - 多文件合并时字段结构不一致
 - 输出路径与输入路径相同
+- 仍有 `pending` 的排除候选
+- 已确认候选对应的源行内容发生变化
 
 warning 包括：
 
 - 少量空行
-- 存在合计 / 备注行且已排除
+- 存在用户已确认排除的合计 / 备注 / 签字行
 - 部分 sheet 没有数据区
 - 字段名重复但已自动去重
 
 ### Phase E: Execute
 
 用户确认规则后再执行：
+
+接受全部建议：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py confirm-exclusions \
+  --session-dir .cleaning-session \
+  --accept-suggested
+```
+
+逐项确认时，通过候选 ID 使用 `--exclude <id...>` 和 `--keep <id...>`；未明确处理的候选保持 `pending`，不得执行。
 
 ```bash
 python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py start-run --session-dir .cleaning-session
@@ -128,6 +141,8 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.p
 - 原文件未修改
 - 规则已记录
 - warning 摘要
+- `清洗排除记录` Tab 名与最终排除行数
+- 每条最终排除行的来源、类型和依据
 
 只有用户下一条消息明确回复继续分析后，才执行：
 

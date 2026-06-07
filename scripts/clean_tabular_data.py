@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import re
@@ -52,7 +53,10 @@ FIELD_KEYWORDS = (
     "city",
     "flight",
 )
-SUMMARY_WORDS = ("合计", "总计", "小计", "汇总", "备注", "说明", "制表", "审核", "复核", "subtotal", "total", "note")
+SUMMARY_LABELS = ("合计", "总计", "小计", "汇总")
+NOTE_LABELS = ("备注", "说明")
+SIGNOFF_LABELS = ("制表", "审核", "复核")
+AUDIT_SHEET_NAME = "清洗排除记录"
 
 
 @dataclass
@@ -63,6 +67,7 @@ class Region:
     data_end_row: int | None
     included_rows: list[int]
     skipped_rows: list[dict[str, Any]]
+    exclusion_candidates: list[dict[str, Any]]
     confidence: str
     evidence: list[str]
 
@@ -209,11 +214,85 @@ def data_signal_count(row: list[Any]) -> int:
     return signals
 
 
-def is_summary_row(row: list[Any]) -> bool:
-    text = " ".join(cell_text(value).lower() for value in non_empty_values(row))
-    if not text:
-        return False
-    return any(word.lower() in text for word in SUMMARY_WORDS)
+def row_content_hash(row: list[Any]) -> str:
+    payload = json.dumps([cell_text(value) for value in row], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def matched_cell(column: int, value: Any, label: str) -> dict[str, Any]:
+    return {"column": column, "value": cell_text(value), "label": label}
+
+
+def exclusion_candidate(row: list[Any], expected_width: int) -> dict[str, Any] | None:
+    populated = [(idx + 1, value, cell_text(value)) for idx, value in enumerate(row) if cell_text(value)]
+    if not populated:
+        return None
+
+    width = len(populated)
+    sparse_limit = max(2, math.ceil(expected_width * 0.35))
+    is_sparse = width <= sparse_limit
+    numeric_count = sum(1 for _, value, _ in populated if parse_number(value) is not None)
+
+    for column, value, text in populated[:2]:
+        normalized = re.sub(r"[\s:：_-]+", "", text).lower()
+        summary_match = next(
+            (
+                label
+                for label in SUMMARY_LABELS
+                if normalized == label or (normalized.endswith(label) and len(normalized) <= 12)
+            ),
+            None,
+        )
+        english_summary = normalized in {"subtotal", "total", "grandtotal"}
+        if (summary_match or english_summary) and (is_sparse or numeric_count > 0):
+            label = summary_match or normalized
+            return {
+                "category": "summary",
+                "reason": "summary_row_candidate",
+                "matched_cells": [matched_cell(column, value, label)],
+                "evidence": f"前两个非空单元格中出现汇总标签“{text}”，且该行稀疏或包含数值",
+                "suggested_action": "exclude",
+            }
+
+    first_column, first_value, first_text = populated[0]
+    normalized_first = first_text.strip().lower()
+    if is_sparse:
+        for label in NOTE_LABELS:
+            if re.fullmatch(rf"{label}(?:\s*[:：].*)?", normalized_first, flags=re.IGNORECASE):
+                return {
+                    "category": "note",
+                    "reason": "note_row_candidate",
+                    "matched_cells": [matched_cell(first_column, first_value, label)],
+                    "evidence": f"首个非空单元格为说明标签“{first_text}”，且该行明显稀疏",
+                    "suggested_action": "exclude",
+                }
+        if re.fullmatch(r"note(?:\s*[:：].*)?", normalized_first, flags=re.IGNORECASE):
+            return {
+                "category": "note",
+                "reason": "note_row_candidate",
+                "matched_cells": [matched_cell(first_column, first_value, "note")],
+                "evidence": f"首个非空单元格为说明标签“{first_text}”，且该行明显稀疏",
+                "suggested_action": "exclude",
+            }
+        for label in SIGNOFF_LABELS:
+            if re.fullmatch(rf"{label}(?:人|员)?(?:\s*[:：].*)?", normalized_first):
+                return {
+                    "category": "signoff",
+                    "reason": "signoff_row_candidate",
+                    "matched_cells": [matched_cell(first_column, first_value, label)],
+                    "evidence": f"首个非空单元格为签字标签“{first_text}”，且该行明显稀疏",
+                    "suggested_action": "exclude",
+                }
+
+    if width < max(2, expected_width * 0.2):
+        return {
+            "category": "sparse",
+            "reason": "too_sparse_candidate",
+            "matched_cells": [],
+            "evidence": f"该行仅有 {width} 个非空单元格，显著少于表头宽度 {expected_width}",
+            "suggested_action": "exclude",
+        }
+    return None
 
 
 def row_similarity(a: list[Any], b: list[Any]) -> float:
@@ -237,7 +316,7 @@ def looks_like_english_header(row: list[Any], expected_width: int) -> bool:
 
 
 def looks_like_data_row(row: list[Any], expected_width: int) -> bool:
-    if is_blank_row(row) or is_summary_row(row):
+    if is_blank_row(row) or exclusion_candidate(row, expected_width):
         return False
     values = non_empty_values(row)
     if len(values) < max(3, expected_width * 0.35):
@@ -337,10 +416,11 @@ def detect_region(rows: list[list[Any]]) -> Region | None:
             break
     if data_start_idx is None:
         confidence = "low"
-        return Region(header_idx + 1, header_rows, None, None, [], [], confidence, evidence)
+        return Region(header_idx + 1, header_rows, None, None, [], [], [], confidence, evidence)
 
     included: list[int] = []
     skipped: list[dict[str, Any]] = []
+    exclusion_candidates: list[dict[str, Any]] = []
     blank_streak = 0
     data_end_idx = data_start_idx
     for idx in range(data_start_idx, len(rows)):
@@ -351,12 +431,17 @@ def detect_region(rows: list[list[Any]]) -> Region | None:
                 break
             continue
         blank_streak = 0
-        if is_summary_row(row):
-            skipped.append({"row": idx + 1, "reason": "summary_or_note"})
-            continue
-        if row_width(row) < max(2, header_width * 0.2):
-            skipped.append({"row": idx + 1, "reason": "too_sparse"})
-            continue
+        candidate = exclusion_candidate(row, header_width)
+        if candidate:
+            exclusion_candidates.append(
+                {
+                    **candidate,
+                    "row": idx + 1,
+                    "row_values": [cell_text(value) for value in row],
+                    "content_hash": row_content_hash(row),
+                    "decision": "pending",
+                }
+            )
         included.append(idx + 1)
         data_end_idx = idx
 
@@ -366,7 +451,17 @@ def detect_region(rows: list[list[Any]]) -> Region | None:
         confidence = "medium"
     else:
         confidence = "low"
-    return Region(header_idx + 1, header_rows, data_start_idx + 1, data_end_idx + 1, included, skipped, confidence, evidence)
+    return Region(
+        header_idx + 1,
+        header_rows,
+        data_start_idx + 1,
+        data_end_idx + 1,
+        included,
+        skipped,
+        exclusion_candidates,
+        confidence,
+        evidence,
+    )
 
 
 def unique_headers(row: list[Any]) -> list[str]:
@@ -416,6 +511,37 @@ def load_sources(paths: list[Path], sheet_name: str | None) -> list[dict[str, An
     return sources
 
 
+def candidate_id(source_file: str, source_sheet: str, row: int, content_hash: str) -> str:
+    payload = f"{source_file}\0{source_sheet}\0{row}\0{content_hash}"
+    return f"exclude-{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def bind_candidate_identity(
+    candidate: dict[str, Any],
+    source_file: str,
+    source_sheet: str,
+) -> dict[str, Any]:
+    result = dict(candidate)
+    result["id"] = candidate_id(source_file, source_sheet, int(candidate["row"]), candidate["content_hash"])
+    result["source_file"] = source_file
+    result["source_sheet"] = source_sheet
+    return result
+
+
+def candidate_counts(candidates: list[dict[str, Any]]) -> dict[str, int]:
+    decisions = [
+        decision if decision in {"exclude", "keep"} else "pending"
+        for candidate in candidates
+        for decision in [candidate.get("decision", "pending")]
+    ]
+    return {
+        "total": len(candidates),
+        "pending": decisions.count("pending"),
+        "exclude": decisions.count("exclude"),
+        "keep": decisions.count("keep"),
+    }
+
+
 def build_item(source: dict[str, Any]) -> dict[str, Any]:
     rows = source["rows"]
     region = detect_region(rows)
@@ -430,9 +556,15 @@ def build_item(source: dict[str, Any]) -> dict[str, Any]:
         }
     header_values = rows[region.header_row - 1]
     headers = unique_headers(header_values)
+    source_file = str(source["path"])
+    source_sheet = source["sheet"]
+    candidates = [
+        bind_candidate_identity(candidate, source_file, source_sheet)
+        for candidate in region.exclusion_candidates
+    ]
     return {
-        "source_file": str(source["path"]),
-        "source_sheet": source["sheet"],
+        "source_file": source_file,
+        "source_sheet": source_sheet,
         "row_count": len(rows),
         "detected": True,
         "confidence": region.confidence,
@@ -443,6 +575,8 @@ def build_item(source: dict[str, Any]) -> dict[str, Any]:
         "included_row_count": len(region.included_rows),
         "included_rows": region.included_rows,
         "skipped_rows": region.skipped_rows,
+        "exclusion_candidates": candidates,
+        "exclusion_candidate_counts": candidate_counts(candidates),
         "headers": headers,
         "evidence": region.evidence,
     }
@@ -459,20 +593,100 @@ def build_item_from_rule(source: dict[str, Any], rule_item: dict[str, Any]) -> d
     header_width = len(headers)
     included_rows = []
     skipped_rows = []
+    source_file = str(source["path"])
+    source_sheet = source["sheet"]
+    saved_candidates = {
+        int(candidate["row"]): candidate
+        for candidate in rule_item.get("exclusion_candidates", [])
+        if candidate.get("row") is not None
+    }
+    candidates = []
+    validation_errors = []
+    processed_saved_rows = set()
     for row_number in range(data_start, min(data_end, len(rows)) + 1):
         row = rows[row_number - 1]
+        saved = saved_candidates.get(row_number)
+        if saved:
+            processed_saved_rows.add(row_number)
         if is_blank_row(row):
+            if saved:
+                current_hash = row_content_hash(row)
+                validation_errors.append(
+                    {
+                        "row": row_number,
+                        "reason": "candidate_source_row_changed",
+                        "expected_hash": saved.get("content_hash"),
+                        "actual_hash": current_hash,
+                    }
+                )
+                candidates.append(
+                    bind_candidate_identity(
+                        {
+                            **saved,
+                            "row": row_number,
+                            "row_values": [cell_text(value) for value in row],
+                            "content_hash": current_hash,
+                            "decision": "pending",
+                        },
+                        source_file,
+                        source_sheet,
+                    )
+                )
             continue
-        if is_summary_row(row):
-            skipped_rows.append({"row": row_number, "reason": "summary_or_note"})
-            continue
-        if row_width(row) < max(2, header_width * 0.2):
-            skipped_rows.append({"row": row_number, "reason": "too_sparse"})
-            continue
+        detected = exclusion_candidate(row, header_width)
+        if detected or saved:
+            current_hash = row_content_hash(row)
+            if saved and saved.get("content_hash") != current_hash:
+                validation_errors.append(
+                    {
+                        "row": row_number,
+                        "reason": "candidate_source_row_changed",
+                        "expected_hash": saved.get("content_hash"),
+                        "actual_hash": current_hash,
+                    }
+                )
+            candidate = {
+                **(detected or {}),
+                **(saved or {}),
+                "row": row_number,
+                "row_values": [cell_text(value) for value in row],
+                "content_hash": current_hash,
+            }
+            if not saved or saved.get("content_hash") != current_hash:
+                candidate["decision"] = "pending"
+            candidate = bind_candidate_identity(candidate, source_file, source_sheet)
+            candidates.append(candidate)
+            if candidate.get("decision") == "exclude":
+                skipped_rows.append(
+                    {
+                        **candidate,
+                        "reason": candidate.get("reason", "confirmed_exclusion"),
+                        "decision": "exclude",
+                    }
+                )
+                continue
         included_rows.append(row_number)
+    for row_number, saved in saved_candidates.items():
+        if row_number in processed_saved_rows:
+            continue
+        validation_errors.append(
+            {
+                "row": row_number,
+                "reason": "candidate_source_row_missing",
+                "expected_hash": saved.get("content_hash"),
+                "actual_hash": None,
+            }
+        )
+        candidates.append(
+            bind_candidate_identity(
+                {**saved, "decision": "pending"},
+                source_file,
+                source_sheet,
+            )
+        )
     return {
-        "source_file": str(source["path"]),
-        "source_sheet": source["sheet"],
+        "source_file": source_file,
+        "source_sheet": source_sheet,
         "row_count": len(rows),
         "detected": True,
         "confidence": rule_item.get("confidence", "manual"),
@@ -483,6 +697,9 @@ def build_item_from_rule(source: dict[str, Any], rule_item: dict[str, Any]) -> d
         "included_row_count": len(included_rows),
         "included_rows": included_rows,
         "skipped_rows": skipped_rows,
+        "exclusion_candidates": candidates,
+        "exclusion_candidate_counts": candidate_counts(candidates),
+        "validation_errors": validation_errors,
         "headers": headers,
         "evidence": ["loaded from confirmed rules JSON"],
     }
@@ -541,7 +758,7 @@ def build_rules(
     merge_mode: str,
 ) -> dict[str, Any]:
     return {
-        "version": "1.0",
+        "version": "2.0",
         "generated_at": datetime.now().astimezone().isoformat(),
         "header": {
             "detect_mode": "score_based",
@@ -551,7 +768,8 @@ def build_rules(
         "data_region": {
             "start_after_header_rows": True,
             "end_on_two_blank_rows": True,
-            "exclude_summary_or_note_rows": True,
+            "exclusion_mode": "confirmed_candidates_only",
+            "require_candidate_decisions": True,
         },
         "output": {
             "target_sheet": target_sheet,
@@ -569,6 +787,7 @@ def build_rules(
                 "data_start_row": item.get("data_start_row"),
                 "data_end_row": item.get("data_end_row"),
                 "confidence": item.get("confidence"),
+                "exclusion_candidates": item.get("exclusion_candidates", []),
             }
             for item in profile.get("items", [])
         ],
@@ -616,6 +835,7 @@ def build_sheet_groups(profile: dict[str, Any]) -> list[dict[str, Any]]:
                     "header_differences": comparison["differences"],
                     "actual_data_rows": item.get("included_row_count", 0),
                     "skipped_row_count": len(item.get("skipped_rows", [])),
+                    "exclusion_candidate_counts": item.get("exclusion_candidate_counts", {}),
                 }
             )
         groups.append(
@@ -629,6 +849,9 @@ def build_sheet_groups(profile: dict[str, Any]) -> list[dict[str, Any]]:
                 "sources": sources,
                 "merged_data_rows": sum(item.get("included_row_count", 0) for item in items),
                 "merged_skipped_rows": sum(len(item.get("skipped_rows", [])) for item in items),
+                "merged_exclusion_candidates": sum(
+                    item.get("exclusion_candidate_counts", {}).get("total", 0) for item in items
+                ),
             }
         )
     return groups
@@ -701,7 +924,7 @@ def write_output(
     add_lineage: bool,
     merge_same_sheets: bool,
     keep_separate_sheets: bool,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if Workbook is None:
         raise SystemExit("openpyxl is required to write .xlsx files")
     source_key = {(str(source["path"]), source["sheet"]): source for source in sources}
@@ -736,6 +959,7 @@ def write_output(
                     "source_file": item["source_file"],
                     "source_sheet": item["source_sheet"],
                     "actual_data_rows": item["included_row_count"],
+                    "excluded_rows": len(item.get("skipped_rows", [])),
                 }
             )
         written_groups.append(
@@ -744,11 +968,45 @@ def write_output(
                 "source_count": len(group["items"]),
                 "source_stats": source_stats,
                 "total_data_rows": sum(item["included_row_count"] for item in group["items"]),
+                "total_excluded_rows": sum(len(item.get("skipped_rows", [])) for item in group["items"]),
             }
         )
+
+    audit_sheet_name = safe_sheet_name(AUDIT_SHEET_NAME, existing_names)
+    audit_sheet = workbook.create_sheet(audit_sheet_name)
+    audit_sheet.append(
+        [
+            "来源文件",
+            "来源工作表",
+            "源行号",
+            "排除类型",
+            "命中内容",
+            "排除依据",
+            "用户决策",
+            "原始行内容",
+        ]
+    )
+    audit_count = 0
+    for item in profile["items"]:
+        for skipped in item.get("skipped_rows", []):
+            matched = json.dumps(skipped.get("matched_cells", []), ensure_ascii=False)
+            row_values = json.dumps(skipped.get("row_values", []), ensure_ascii=False)
+            audit_sheet.append(
+                [
+                    item["source_file"],
+                    item["source_sheet"],
+                    skipped["row"],
+                    skipped.get("category", skipped.get("reason", "")),
+                    matched,
+                    skipped.get("evidence", ""),
+                    skipped.get("decision", "exclude"),
+                    row_values,
+                ]
+            )
+            audit_count += 1
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output_path)
-    return written_groups
+    return written_groups, {"sheet_name": audit_sheet_name, "excluded_row_count": audit_count}
 
 
 def main() -> None:
@@ -789,6 +1047,26 @@ def main() -> None:
     merge_candidates = [group for group in profile["sheet_groups"] if group["requires_merge_decision"]]
     merge_decision_required = bool(merge_candidates) and merge_mode == "pending_confirmation"
     blocking = [item for item in profile["items"] if not item.get("detected") or item.get("confidence") == "low"]
+    all_candidates = [
+        candidate
+        for item in profile["items"]
+        for candidate in item.get("exclusion_candidates", [])
+    ]
+    pending_candidates = [
+        candidate
+        for candidate in all_candidates
+        if candidate.get("decision") not in {"exclude", "keep"}
+    ]
+    candidate_validation_errors = [
+        {
+            "source_file": item["source_file"],
+            "source_sheet": item["source_sheet"],
+            **error,
+        }
+        for item in profile["items"]
+        for error in item.get("validation_errors", [])
+    ]
+    exclusion_counts = candidate_counts(all_candidates)
     summary = {
         "generated_at": datetime.now().astimezone().isoformat(),
         "mode": "execute" if args.execute else "dry_run",
@@ -796,8 +1074,16 @@ def main() -> None:
         "target_sheet": args.target_sheet,
         "source_count": len(sources),
         "total_included_rows": sum(item.get("included_row_count", 0) for item in profile["items"]),
-        "blocking_count": len(blocking) + len(profile["blocking_issues"]),
+        "blocking_count": (
+            len(blocking)
+            + len(profile["blocking_issues"])
+            + int(bool(pending_candidates))
+            + int(bool(candidate_validation_errors))
+        ),
         "blocking_issues": profile["blocking_issues"],
+        "exclusion_candidate_counts": exclusion_counts,
+        "exclusion_confirmation_required": bool(pending_candidates),
+        "candidate_validation_errors": candidate_validation_errors,
         "merge_mode": merge_mode,
         "merge_decision_required": merge_decision_required,
         "sheet_groups": profile["sheet_groups"],
@@ -811,6 +1097,9 @@ def main() -> None:
                 "data_end_row": item.get("data_end_row"),
                 "included_row_count": item.get("included_row_count", 0),
                 "skipped_rows": item.get("skipped_rows", []),
+                "exclusion_candidates": item.get("exclusion_candidates", []),
+                "exclusion_candidate_counts": item.get("exclusion_candidate_counts", {}),
+                "validation_errors": item.get("validation_errors", []),
             }
             for item in profile["items"]
         ],
@@ -826,6 +1115,14 @@ def main() -> None:
     if args.execute:
         if blocking or profile["blocking_issues"]:
             raise SystemExit("Blocking structure issues remain; review dry-run output before executing.")
+        if candidate_validation_errors:
+            raise SystemExit("排除候选对应的源行已变化；请重新 dry-run 并让用户确认新的候选行。")
+        if pending_candidates:
+            rows = ", ".join(
+                f"{Path(candidate['source_file']).name}/{candidate['source_sheet']}:{candidate['row']}"
+                for candidate in pending_candidates[:10]
+            )
+            raise SystemExit(f"仍有待用户确认的排除候选行，不能执行清洗：{rows}")
         if merge_decision_required:
             names = ", ".join(group["sheet_name"] for group in merge_candidates)
             raise SystemExit(
@@ -837,7 +1134,7 @@ def main() -> None:
                 json.dumps(rules, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
-        written_groups = write_output(
+        written_groups, exclusion_audit = write_output(
             profile,
             sources,
             output_path,
@@ -848,6 +1145,7 @@ def main() -> None:
         )
         summary["written"] = True
         summary["written_sheet_groups"] = written_groups
+        summary["exclusion_audit"] = exclusion_audit
         if args.handoff_output:
             handoff_path = Path(args.handoff_output).expanduser().resolve()
             if args.rules:
@@ -893,6 +1191,16 @@ def main() -> None:
                 "source_files": [str(path) for path in input_paths],
                 "lineage_columns": rules.get("output", {}).get("lineage_columns", []),
                 "output_sheets": written_groups,
+                "exclusion_audit": exclusion_audit,
+                "excluded_rows": [
+                    {
+                        "source_file": item["source_file"],
+                        "source_sheet": item["source_sheet"],
+                        **skipped,
+                    }
+                    for item in profile["items"]
+                    for skipped in item.get("skipped_rows", [])
+                ],
                 "warnings": [
                     {
                         "source_file": item["source_file"],

@@ -48,6 +48,11 @@
       "total_data_rows": 521
     }
   ],
+  "exclusion_audit": {
+    "sheet_name": "清洗排除记录",
+    "excluded_row_count": 3
+  },
+  "excluded_rows": [],
   "warnings": [],
   "profile_summary": {
     "source_count": 1,
@@ -67,6 +72,8 @@
 - `output_sheets`：每个输出 Tab 的各来源实际行数和合并总行数
 - `rules.status == saved`：清洗规则已记录，可用于重跑和追溯
 - `warnings`：清洗时需要用户知晓的事项；为空时显示“无”
+- `exclusion_audit`：清洗工作簿中的排除审计 Tab 及最终排除行数
+- `excluded_rows`：用户确认排除的来源行、类型、依据和原始内容
 - `analysis_gate.status == awaiting_user_confirmation`：已完成清洗，正在等待用户确认是否继续分析
 - `analysis_goal_gate.status == awaiting_confirmation`：清洗结果已确认，但分析目标尚未确认
 

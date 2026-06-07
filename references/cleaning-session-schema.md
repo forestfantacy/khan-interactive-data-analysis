@@ -46,7 +46,9 @@
 - `items[].data_start_row`
 - `items[].data_end_row`
 - `items[].included_row_count`
-- `items[].skipped_rows`
+- `items[].exclusion_candidates`
+- `items[].exclusion_candidate_counts`
+- `items[].skipped_rows`（仅包含用户确认排除的行）
 - `items[].headers`
 - `items[].confidence`
 - `items[].evidence`
@@ -58,7 +60,9 @@
 - 表头识别方式
 - 数据区起止规则
 - 是否跳过双语 / 系统字段表头
-- 是否排除合计 / 备注 / 说明行
+- 排除候选的来源行、类型、命中内容、原始行内容和内容哈希
+- 每条候选的用户决策：`pending` / `exclude` / `keep`
+- 正式执行前不得存在 `pending`
 - 输出文件与目标 tab
 - 同名 Tab 的处理方式：等待确认 / 合并 / 分别保留
 - 追溯字段
@@ -82,6 +86,7 @@
 - `save-profile`：保存结构画像
 - `save-rules`：保存清洗规则
 - `decide`：记录用户对规则或异常的决策
+- `confirm-exclusions`：将用户对排除候选的确认写入 `rules.json`
 - `start-run`：创建清洗 run
 - `save-run`：保存 dry-run 或执行摘要
 - `invalidate`：回退检查点，并将旧 run 标记为 `superseded`

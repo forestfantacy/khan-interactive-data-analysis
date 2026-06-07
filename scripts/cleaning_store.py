@@ -138,6 +138,69 @@ def cmd_decide(args: argparse.Namespace) -> None:
     print(json.dumps({"ok": True, "decision_id": decision_id}, ensure_ascii=False, indent=2))
 
 
+def cmd_confirm_exclusions(args: argparse.Namespace) -> None:
+    session_dir = Path(args.session_dir)
+    session, _, rules, _ = load_state(session_dir)
+    candidates = [
+        candidate
+        for item in rules.get("items", [])
+        for candidate in item.get("exclusion_candidates", [])
+    ]
+    if not candidates:
+        print(json.dumps({"ok": True, "message": "没有需要确认的排除候选行"}, ensure_ascii=False, indent=2))
+        return
+    if not (args.accept_suggested or args.keep_all or args.exclude or args.keep):
+        raise SystemExit("请使用 --accept-suggested、--keep-all、--exclude 或 --keep 提供用户确认结果")
+
+    exclude_ids = set(args.exclude or [])
+    keep_ids = set(args.keep or [])
+    duplicated = exclude_ids & keep_ids
+    if duplicated:
+        raise SystemExit(f"同一候选不能同时保留和排除：{', '.join(sorted(duplicated))}")
+    known_ids = {candidate.get("id") for candidate in candidates}
+    unknown_ids = (exclude_ids | keep_ids) - known_ids
+    if unknown_ids:
+        raise SystemExit(f"找不到排除候选：{', '.join(sorted(unknown_ids))}")
+
+    for candidate in candidates:
+        candidate_id = candidate.get("id")
+        if args.accept_suggested:
+            candidate["decision"] = candidate.get("suggested_action", "exclude")
+        if args.keep_all:
+            candidate["decision"] = "keep"
+        if candidate_id in exclude_ids:
+            candidate["decision"] = "exclude"
+        if candidate_id in keep_ids:
+            candidate["decision"] = "keep"
+
+    counts = {
+        decision: sum(1 for candidate in candidates if candidate.get("decision") == decision)
+        for decision in ("pending", "exclude", "keep")
+    }
+    decision_id = f"exclusion_decision_{datetime.now().strftime('%Y_%m_%d_%H%M%S')}"
+    decision = {
+        "id": decision_id,
+        "target_type": "exclusion_candidates",
+        "choice": "confirmed",
+        "accept_suggested": args.accept_suggested,
+        "keep_all": args.keep_all,
+        "exclude_ids": sorted(exclude_ids),
+        "keep_ids": sorted(keep_ids),
+        "counts": counts,
+        "timestamp": now_iso(),
+    }
+    session.setdefault("decisions", []).append(decision)
+    session.setdefault("resolved_decision_ids", []).append(decision_id)
+    session["current_phase"] = "Phase D: Exclusion Decisions Confirmed"
+    session["active_checkpoint"] = "D"
+    session.setdefault("history", []).append(
+        {"event": "confirm_exclusions", "decision_id": decision_id, "counts": counts, "at": now_iso()}
+    )
+    write_json(session_dir / "rules.json", rules)
+    write_json(session_dir / "session.json", session)
+    print(json.dumps({"ok": True, "decision_id": decision_id, "counts": counts}, ensure_ascii=False, indent=2))
+
+
 def cmd_start_run(args: argparse.Namespace) -> None:
     session_dir = Path(args.session_dir)
     session, _, rules, runs_dir = load_state(session_dir)
@@ -317,6 +380,18 @@ def build_parser() -> argparse.ArgumentParser:
     decide.add_argument("--rationale", default="")
     decide.add_argument("--invalidates-from-phase", default="Phase C")
     decide.set_defaults(func=cmd_decide)
+
+    confirm_exclusions = subparsers.add_parser("confirm-exclusions")
+    confirm_exclusions.add_argument("--session-dir", required=True)
+    confirm_exclusions.add_argument(
+        "--accept-suggested",
+        action="store_true",
+        help="Apply each candidate's suggested action; currently summary/note/signoff candidates suggest exclusion.",
+    )
+    confirm_exclusions.add_argument("--keep-all", action="store_true", help="Keep every candidate row.")
+    confirm_exclusions.add_argument("--exclude", nargs="*", metavar="CANDIDATE_ID")
+    confirm_exclusions.add_argument("--keep", nargs="*", metavar="CANDIDATE_ID")
+    confirm_exclusions.set_defaults(func=cmd_confirm_exclusions)
 
     start_run = subparsers.add_parser("start-run")
     start_run.add_argument("--session-dir", required=True)
