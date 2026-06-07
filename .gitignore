@@ -3,3 +3,4 @@ __pycache__/
 *.py[cod]
 .cleaning-session/
 .analysis-session/
+.data-session/

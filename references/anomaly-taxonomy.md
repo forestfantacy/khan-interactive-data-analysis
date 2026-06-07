@@ -1,39 +1,34 @@
-# 异常分类与默认处理
+# 目标相关的数据质量影响分类
 
-## 1. 严重级别
+异常严重性由“是否影响当前目标”决定，而不是只看数据本身是否异常。
 
-- `blocking`：不处理就不应进入正式分析
-- `warning`：可以继续，但需要显式确认
-- `info`：提示性信息，可直接记录
+## Impact Levels
 
-## 2. 常见异常
+- `blocking`：目标无法可靠回答，必须修复、补数据或修改目标。
+- `material`：可能改变趋势、排名、金额或归因方向，必须逐项确认。
+- `limited`：影响局部精度或分析深度，可以分组确认。
+- `irrelevant`：位于目标契约之外，不影响本轮结论，汇总后批量确认忽略。
 
-| 类别 | 默认级别 | 典型证据 | 默认建议 |
+## Classification
+
+| 问题 | 必需字段 / 关联键 / 时间字段 | 辅助字段 | 契约外字段 |
 | --- | --- | --- | --- |
-| `missing_value` | `blocking` / `warning` | 关键字段缺失、缺失率高 | 明确缺失口径，决定填补、剔除或保留 |
-| `duplicate_row` | `warning` | 明细重复、重复率异常 | 确认是否为真实重复，再决定去重 |
-| `suspicious_zero` | `warning` | 0 值占比过高、关键指标大量为 0 | 确认 0 是否代表真实业务含义 |
-| `outlier` | `warning` | 极端值远离分布主体 | 确认保留、截尾或单独解释 |
-| `time_gap` | `warning` | 时间序列中断、缺月、缺日 | 确认是否允许不连续比较 |
-| `time_before_range` | `warning` | 已确认正常范围之前仍有记录 | 确认是否为历史补录、跨期记录 |
-| `time_after_range` | `warning` | 已确认正常范围之后仍有记录 | 确认是否为未来履约、提前预订 |
-| `mixed_type` | `warning` | 同列数字与文本混杂 | 先确认是否存在脏数据或编码混入 |
-| `metric_contract_risk` | `blocking` | 分子分母、单位、粒度不清 | 明确口径后再分析 |
-| `small_sample` | `warning` | 样本量过小 | 允许方向性判断，不给强结论 |
+| 高缺失或类型混杂 | `blocking` | `limited` | `irrelevant` |
+| 极端值或可疑 0 | `material` | `limited` | `irrelevant` |
+| 时间范围或时间缺口 | `blocking` / `material` | `limited` | `irrelevant` |
+| 重复记录 | 通常 `material` | 通常 `limited` | 视目标范围判断 |
+| 指标口径、单位或粒度不清 | `blocking` | `limited` | `irrelevant` |
+| 小样本 | `material` / `limited` | `limited` | `irrelevant` |
 
-## 3. 阻断条件
+## Required Fields
 
-以下情况默认视为 `blocking`：
+每个异常必须记录：
 
-- 核心收入、成本、分母类字段存在高比例缺失
-- 关键指标口径无法判断
-- 粒度无法判断导致比较基础不成立
-- 时间字段严重异常导致趋势分析无法成立
+- 受影响的目标问题和字段
+- `impact_level`
+- 对结论的具体影响
+- 推荐处置
+- 忽略后的结论置信度
+- 用户决定及理由
 
-## 4. 忽略后的约束
-
-如果用户选择忽略：
-
-- 会话中必须记录 decision
-- 相关结论必须带风险说明
-- 最终报告必须列入“已忽略异常”
+任何异常仍为 `open` 时，不得生成定向清洗文件。用户选择忽略后，相关结论必须披露风险并降低置信度。

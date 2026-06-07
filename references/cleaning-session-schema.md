@@ -3,7 +3,7 @@
 ## 1. 目录结构
 
 ```text
-.cleaning-session/
+.data-session/goals/<goal-id>/cleaning-session/
 ├── session.json
 ├── profile.json
 ├── rules.json
@@ -26,6 +26,9 @@
   "output_path": "raw_清洗后.xlsx",
   "target_sheet": "原始数据_清洗后",
   "cleaning_goal": "提取真实明细数据",
+  "goal_id": "goal-20260607120000",
+  "goal_contract_path": ".data-session/goals/<goal-id>/goal-contract.json",
+  "goal_contract_fingerprint": "sha256:...",
   "current_phase": "Phase C: Rule Confirmation",
   "active_checkpoint": "C",
   "active_run_id": "run-001",
@@ -66,6 +69,8 @@
 - 输出文件与目标 tab
 - 同名 Tab 的处理方式：等待确认 / 合并 / 分别保留
 - 追溯字段
+- 目标字段投影与标准字段名
+- 定向文件路径
 
 ## 5. run 文件
 
@@ -82,7 +87,7 @@
 
 ## 6. cleaning_store.py 命令
 
-- `init`：初始化 `.cleaning-session`
+- `init`：初始化当前目标的 `cleaning-session`
 - `save-profile`：保存结构画像
 - `save-rules`：保存清洗规则
 - `decide`：记录用户对规则或异常的决策
@@ -90,3 +95,5 @@
 - `start-run`：创建清洗 run
 - `save-run`：保存 dry-run 或执行摘要
 - `invalidate`：回退检查点，并将旧 run 标记为 `superseded`
+
+新流程必须绑定已确认目标契约。旧会话缺少 `goal_id` 时可以读取，但继续执行前必须迁移到 `.data-session/goals/<goal-id>/`。

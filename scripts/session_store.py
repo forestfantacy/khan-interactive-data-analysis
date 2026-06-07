@@ -10,6 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+try:
+    from openpyxl import load_workbook
+except ImportError:  # pragma: no cover - optional dependency
+    load_workbook = None
+
 
 def now_iso() -> str:
     return datetime.now().astimezone().isoformat()
@@ -34,6 +39,19 @@ def fingerprint(dataset_path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def targeted_file_metadata(dataset_path: Path) -> dict[str, str]:
+    if dataset_path.suffix.lower() != ".xlsx" or load_workbook is None:
+        return {}
+    workbook = load_workbook(dataset_path, read_only=True, data_only=True)
+    if "数据说明" not in workbook.sheetnames:
+        return {}
+    metadata = {}
+    for row in workbook["数据说明"].iter_rows(min_row=2, values_only=True):
+        if len(row) >= 2 and row[0]:
+            metadata[str(row[0])] = "" if row[1] is None else str(row[1])
+    return metadata
+
+
 def session_paths(session_dir: Path) -> tuple[Path, Path, Path]:
     return (
         session_dir / "session.json",
@@ -55,6 +73,19 @@ def cmd_init(args: argparse.Namespace) -> None:
     session_path, anomalies_path, runs_dir = session_paths(session_dir)
     session_dir.mkdir(parents=True, exist_ok=True)
     runs_dir.mkdir(parents=True, exist_ok=True)
+    goal_contract = read_json(Path(args.goal_contract).expanduser().resolve(), {}) if args.goal_contract else {}
+    if args.goal_contract:
+        if goal_contract.get("status") != "confirmed":
+            raise SystemExit("Goal contract must be confirmed before initializing analysis")
+        if goal_contract.get("goal") != args.goal:
+            raise SystemExit("Analysis goal must match the confirmed goal contract")
+        metadata = targeted_file_metadata(dataset_path)
+        if not metadata:
+            raise SystemExit("Analysis dataset is not a targeted cleaning file with a 数据说明 sheet")
+        if metadata.get("目标 ID") != goal_contract.get("goal_id"):
+            raise SystemExit("Targeted cleaning file belongs to a different goal")
+        if metadata.get("契约指纹") != goal_contract.get("contract_fingerprint"):
+            raise SystemExit("Targeted cleaning file does not match the active goal contract")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     session = {
         "session_id": f"session_{timestamp}",
@@ -71,6 +102,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         "business_context": args.business_context,
         "analysis_sheets": args.analysis_sheets,
         "audience": args.audience,
+        "goal_id": goal_contract.get("goal_id"),
+        "goal_contract_path": str(Path(args.goal_contract).expanduser().resolve()) if args.goal_contract else None,
+        "goal_contract_fingerprint": goal_contract.get("contract_fingerprint"),
         "active_run_id": None,
         "active_checkpoint": "A",
         "open_anomaly_ids": [],
@@ -246,6 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--business-context", default="")
     init.add_argument("--analysis-sheets", nargs="*", default=[])
     init.add_argument("--audience", default="未指定")
+    init.add_argument("--goal-contract")
     init.set_defaults(func=cmd_init)
 
     show = subparsers.add_parser("show")

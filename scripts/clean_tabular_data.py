@@ -56,7 +56,8 @@ FIELD_KEYWORDS = (
 SUMMARY_LABELS = ("合计", "总计", "小计", "汇总")
 NOTE_LABELS = ("备注", "说明")
 SIGNOFF_LABELS = ("制表", "审核", "复核")
-AUDIT_SHEET_NAME = "清洗排除记录"
+AUDIT_SHEET_NAME = "清洗审计"
+DATA_GUIDE_SHEET_NAME = "数据说明"
 
 
 @dataclass
@@ -84,6 +85,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-output", help="Write dry-run or execution summary JSON.")
     parser.add_argument("--handoff-output", help="Write analysis handoff JSON after successful execution.")
     parser.add_argument("--cleaning-run-id", help="Cleaning run ID recorded in the handoff JSON.")
+    parser.add_argument("--goal-contract", help="Confirmed goal-data contract JSON. Required for execution.")
+    parser.add_argument("--field-mapping", help="Confirmed field mapping JSON.")
+    parser.add_argument("--quality-impact", help="Resolved goal-related quality impact JSON. Required for execution.")
     merge_mode = parser.add_mutually_exclusive_group()
     merge_mode.add_argument(
         "--merge-same-sheets",
@@ -743,7 +747,16 @@ def build_profile_from_rules(sources: list[dict[str, Any]], rules_path: Path) ->
     }
 
 
-def default_output_path(paths: list[Path]) -> Path:
+def safe_filename_part(value: str) -> str:
+    value = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", value).strip("_")
+    return value[:40] or "目标"
+
+
+def default_output_path(paths: list[Path], contract: dict[str, Any] | None = None) -> Path:
+    if contract:
+        goal_part = safe_filename_part(contract.get("goal_id") or contract.get("goal") or "目标")
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        return paths[0].parent / f"{paths[0].stem}_{goal_part}_定向清洗_{timestamp}.xlsx"
     if len(paths) == 1:
         path = paths[0]
         return path.with_name(f"{path.stem}_清洗后.xlsx")
@@ -819,18 +832,18 @@ def build_sheet_groups(profile: dict[str, Any]) -> list[dict[str, Any]]:
 
     groups = []
     for sheet_name, items in sorted(grouped.items()):
-        reference = items[0].get("headers", [])
+        reference = items[0].get("target_headers", items[0].get("headers", []))
         sources = []
         all_consistent = True
         for item in items:
-            comparison = compare_headers(reference, item.get("headers", []))
+            comparison = compare_headers(reference, item.get("target_headers", item.get("headers", [])))
             all_consistent = all_consistent and comparison["consistent"]
             sources.append(
                 {
                     "source_file": item["source_file"],
                     "source_sheet": item["source_sheet"],
                     "header_row": item.get("header_row"),
-                    "header_column_count": len(item.get("headers", [])),
+                    "header_column_count": len(item.get("target_headers", item.get("headers", []))),
                     "header_consistent": comparison["consistent"],
                     "header_differences": comparison["differences"],
                     "actual_data_rows": item.get("included_row_count", 0),
@@ -886,6 +899,253 @@ def safe_sheet_name(name: str, existing: set[str]) -> str:
     return candidate
 
 
+def load_confirmed_contract(path: str | None, required: bool) -> dict[str, Any]:
+    if not path:
+        if required:
+            raise SystemExit("--goal-contract is required for execution")
+        return {}
+    contract = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    if contract.get("status") != "confirmed":
+        raise SystemExit("Goal contract must be confirmed before cleaning")
+    return contract
+
+
+def load_confirmed_mapping(path: str | None, contract: dict[str, Any]) -> dict[str, Any]:
+    if not path:
+        return {"status": "implicit", "mappings": []}
+    mapping = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    if mapping.get("status") != "confirmed":
+        raise SystemExit("Field mapping must be confirmed before cleaning")
+    if mapping.get("contract_fingerprint") != contract.get("contract_fingerprint"):
+        raise SystemExit("Field mapping does not match the confirmed goal contract")
+    return mapping
+
+
+def source_file_matches(candidate: str, source_file: str) -> bool:
+    return candidate in {source_file, Path(source_file).name}
+
+
+def normalize_field_mapping(
+    field_mapping: dict[str, Any],
+    profile: dict[str, Any],
+    default_target_sheet: str,
+) -> dict[str, Any]:
+    normalized_items = []
+    errors = []
+    profile_items = [item for item in profile.get("items", []) if item.get("detected")]
+    for index, original in enumerate(field_mapping.get("mappings", []), start=1):
+        mapping = dict(original)
+        source_sheet = mapping.get("source_sheet") or mapping.get("sheet")
+        target_field = mapping.get("target_field") or mapping.get("goal_field")
+        source_field = mapping.get("source_field")
+        source_file = mapping.get("source_file")
+        target_sheet = (
+            mapping.get("target_sheet")
+            or mapping.get("output_sheet")
+            or default_target_sheet
+        )
+
+        candidates = []
+        for item in profile_items:
+            if source_file and not source_file_matches(source_file, item["source_file"]):
+                continue
+            if source_sheet and source_sheet != item["source_sheet"]:
+                continue
+            if source_field and source_field not in item.get("headers", []):
+                continue
+            candidates.append(item)
+
+        missing_keys = [
+            key
+            for key, value in (
+                ("source_field", source_field),
+                ("target_field/goal_field", target_field),
+                ("source_sheet/sheet", source_sheet),
+            )
+            if not value
+        ]
+        if missing_keys:
+            errors.append(
+                {
+                    "mapping_index": index,
+                    "reason": "missing_required_mapping_fields",
+                    "missing": missing_keys,
+                    "mapping": original,
+                }
+            )
+            continue
+        if not candidates:
+            errors.append(
+                {
+                    "mapping_index": index,
+                    "reason": "mapping_source_not_found",
+                    "source_file": source_file,
+                    "source_sheet": source_sheet,
+                    "source_field": source_field,
+                }
+            )
+            continue
+        if len(candidates) > 1:
+            errors.append(
+                {
+                    "mapping_index": index,
+                    "reason": "ambiguous_mapping_source",
+                    "source_sheet": source_sheet,
+                    "source_field": source_field,
+                    "candidate_sources": [
+                        {
+                            "source_file": item["source_file"],
+                            "source_sheet": item["source_sheet"],
+                            "header_row": item.get("header_row"),
+                        }
+                        for item in candidates
+                    ],
+                }
+            )
+            continue
+
+        source_item = candidates[0]
+        normalized_items.append(
+            {
+                **mapping,
+                "source_file": source_item["source_file"],
+                "source_sheet": source_item["source_sheet"],
+                "source_header_row": source_item.get("header_row"),
+                "source_field": source_field,
+                "target_field": target_field,
+                "target_sheet": target_sheet,
+            }
+        )
+
+    if errors:
+        raise SystemExit(
+            "字段映射来源无法可靠确定，请补充或修正映射："
+            + json.dumps(errors, ensure_ascii=False)
+        )
+    return {
+        **field_mapping,
+        "schema_version": "2.0",
+        "mappings": normalized_items,
+        "normalization": {
+            "status": "normalized",
+            "normalized_at": datetime.now().astimezone().isoformat(),
+            "mapping_count": len(normalized_items),
+        },
+    }
+
+
+def validate_quality_impact(path: str | None, contract: dict[str, Any]) -> dict[str, Any]:
+    if not path:
+        raise SystemExit("--quality-impact is required for execution")
+    payload = json.loads(Path(path).expanduser().resolve().read_text(encoding="utf-8"))
+    if payload.get("contract_fingerprint") != contract.get("contract_fingerprint"):
+        raise SystemExit("Quality impact assessment does not match the confirmed goal contract")
+    unresolved = [
+        anomaly
+        for anomaly in payload.get("anomalies", [])
+        if anomaly.get("status") not in {"resolved", "ignored"}
+    ]
+    if unresolved:
+        grouped: dict[str, list[str]] = {}
+        for anomaly in unresolved:
+            grouped.setdefault(anomaly.get("impact_level", "unknown"), []).append(anomaly.get("id", "unknown"))
+        labels = "; ".join(f"{level}: {', '.join(identifiers[:10])}" for level, identifiers in grouped.items())
+        raise SystemExit(f"仍有未确认的数据质量问题：{labels}")
+    expected_scopes = {
+        (str(Path(item.get("file", "")).expanduser().resolve()), item.get("sheet"))
+        for item in contract.get("required_data", {}).get("scope", [])
+        if item.get("file")
+    }
+    assessed_scopes = {
+        (str(Path(item.get("file", "")).expanduser().resolve()), item.get("sheet"))
+        for item in payload.get("assessed_scopes", [])
+        if item.get("file")
+    }
+    missing_scopes = expected_scopes - assessed_scopes
+    if missing_scopes:
+        labels = ", ".join(f"{Path(file).name}/{sheet}" for file, sheet in sorted(missing_scopes))
+        raise SystemExit(f"以下目标数据范围尚未完成质量评估：{labels}")
+    return payload
+
+
+def source_in_scope(source: dict[str, Any], contract: dict[str, Any]) -> bool:
+    scope = contract.get("required_data", {}).get("scope", [])
+    if not scope:
+        return True
+    source_path = str(source["path"])
+    for item in scope:
+        file_match = item.get("file") in {source_path, source["path"].name}
+        sheet_match = not item.get("sheet") or item.get("sheet") == source["sheet"]
+        if file_match and sheet_match:
+            return True
+    return False
+
+
+def contract_fields(contract: dict[str, Any]) -> list[str]:
+    required_data = contract.get("required_data", {})
+    fields = []
+    for key in ("required_fields", "supporting_fields", "join_keys", "time_fields"):
+        for field in required_data.get(key, []):
+            if field not in fields:
+                fields.append(field)
+    return fields
+
+
+def mapping_for_item(
+    item: dict[str, Any],
+    target_fields: list[str],
+    field_mapping: dict[str, Any],
+) -> dict[str, str]:
+    result = {field: field for field in target_fields if field in item.get("headers", [])}
+    for mapping in field_mapping.get("mappings", []):
+        source_file = mapping.get("source_file")
+        source_sheet = mapping.get("source_sheet")
+        if source_file and source_file not in {item["source_file"], Path(item["source_file"]).name}:
+            continue
+        if source_sheet and source_sheet != item["source_sheet"]:
+            continue
+        target = mapping.get("target_field")
+        source = mapping.get("source_field")
+        if target in target_fields and source in item.get("headers", []):
+            result[target] = source
+    return result
+
+
+def apply_contract_projection(
+    profile: dict[str, Any],
+    contract: dict[str, Any],
+    field_mapping: dict[str, Any],
+) -> list[dict[str, Any]]:
+    target_fields = contract_fields(contract)
+    required_fields = set(contract.get("required_data", {}).get("required_fields", []))
+    gaps = []
+    for item in profile.get("items", []):
+        if not item.get("detected"):
+            continue
+        mapping = mapping_for_item(item, target_fields, field_mapping)
+        target_groups = {
+            entry.get("target_sheet")
+            for entry in field_mapping.get("mappings", [])
+            if entry.get("target_sheet")
+            and (not entry.get("source_file") or entry.get("source_file") in {item["source_file"], Path(item["source_file"]).name})
+            and (not entry.get("source_sheet") or entry.get("source_sheet") == item["source_sheet"])
+        }
+        if len(target_groups) == 1:
+            item["target_group"] = next(iter(target_groups))
+        missing = sorted(required_fields - set(mapping))
+        item["field_projection"] = mapping
+        item["target_headers"] = list(target_fields)
+        if missing:
+            gaps.append(
+                {
+                    "source_file": item["source_file"],
+                    "source_sheet": item["source_sheet"],
+                    "missing_required_fields": missing,
+                }
+            )
+    return gaps
+
+
 def output_groups(
     profile: dict[str, Any],
     target_sheet: str,
@@ -898,11 +1158,11 @@ def output_groups(
 
     grouped: dict[str, list[dict[str, Any]]] = {}
     for item in items:
-        grouped.setdefault(item["source_sheet"], []).append(item)
+        grouped.setdefault(item.get("target_group", item["source_sheet"]), []).append(item)
 
     result = []
     for sheet_name, sheet_items in sorted(grouped.items()):
-        if len(sheet_items) == 1 or merge_same_sheets:
+        if len(sheet_items) == 1 or merge_same_sheets or any(item.get("target_group") for item in sheet_items):
             result.append({"output_sheet": sheet_name, "items": sheet_items})
             continue
         if keep_separate_sheets:
@@ -924,6 +1184,9 @@ def write_output(
     add_lineage: bool,
     merge_same_sheets: bool,
     keep_separate_sheets: bool,
+    contract: dict[str, Any],
+    field_mapping: dict[str, Any],
+    quality_impact: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if Workbook is None:
         raise SystemExit("openpyxl is required to write .xlsx files")
@@ -931,12 +1194,23 @@ def write_output(
     workbook = Workbook()
     workbook.remove(workbook.active)
     existing_names: set[str] = set()
+    guide_sheet_name = safe_sheet_name(DATA_GUIDE_SHEET_NAME, existing_names)
+    guide_sheet = workbook.create_sheet(guide_sheet_name)
+    guide_sheet.append(["项目", "内容"])
+    guide_sheet.append(["目标 ID", contract.get("goal_id", "")])
+    guide_sheet.append(["目标", contract.get("goal", "")])
+    guide_sheet.append(["目标类型", contract.get("goal_type", "")])
+    guide_sheet.append(["决策对象", contract.get("decision_object", "")])
+    guide_sheet.append(["契约指纹", contract.get("contract_fingerprint", "")])
+    guide_sheet.append(["必需字段", "、".join(contract.get("required_data", {}).get("required_fields", []))])
+    guide_sheet.append(["辅助字段", "、".join(contract.get("required_data", {}).get("supporting_fields", []))])
+    guide_sheet.append(["适用限制", json.dumps(contract.get("assumptions", []), ensure_ascii=False)])
     written_groups = []
     for group in output_groups(profile, target_sheet, merge_same_sheets, keep_separate_sheets):
         output_sheet = safe_sheet_name(group["output_sheet"], existing_names)
         worksheet = workbook.create_sheet(output_sheet)
         first_item = group["items"][0]
-        canonical_headers = list(first_item["headers"])
+        canonical_headers = list(first_item.get("target_headers", first_item["headers"]))
         output_headers = list(canonical_headers)
         if add_lineage:
             output_headers.extend(["源文件名", "源工作表名", "源行号"])
@@ -946,11 +1220,15 @@ def write_output(
         for item in group["items"]:
             source = source_key[(item["source_file"], item["source_sheet"])]
             rows = source["rows"]
+            source_indexes = {header: index for index, header in enumerate(item["headers"])}
+            projection = item.get("field_projection", {header: header for header in canonical_headers})
             for row_number in item["included_rows"]:
                 row = rows[row_number - 1]
-                values = list(row[: len(canonical_headers)])
-                if len(values) < len(canonical_headers):
-                    values.extend([None] * (len(canonical_headers) - len(values)))
+                values = []
+                for target_field in canonical_headers:
+                    source_field = projection.get(target_field)
+                    source_index = source_indexes.get(source_field) if source_field else None
+                    values.append(row[source_index] if source_index is not None and source_index < len(row) else None)
                 if add_lineage:
                     values.extend([Path(item["source_file"]).name, item["source_sheet"], row_number])
                 worksheet.append(values)
@@ -976,16 +1254,19 @@ def write_output(
     audit_sheet = workbook.create_sheet(audit_sheet_name)
     audit_sheet.append(
         [
+            "审计类型",
             "来源文件",
             "来源工作表",
-            "源行号",
-            "排除类型",
-            "命中内容",
-            "排除依据",
+            "来源表头行",
+            "源数据行号",
+            "来源字段 / 命中内容",
+            "目标字段 / 处理依据",
+            "目标工作表",
             "用户决策",
-            "原始行内容",
+            "原始内容 / 记录 ID",
         ]
     )
+    excluded_count = 0
     audit_count = 0
     for item in profile["items"]:
         for skipped in item.get("skipped_rows", []):
@@ -993,30 +1274,87 @@ def write_output(
             row_values = json.dumps(skipped.get("row_values", []), ensure_ascii=False)
             audit_sheet.append(
                 [
+                    "排除记录",
                     item["source_file"],
                     item["source_sheet"],
+                    item.get("header_row", "不适用"),
                     skipped["row"],
-                    skipped.get("category", skipped.get("reason", "")),
                     matched,
                     skipped.get("evidence", ""),
+                    "",
                     skipped.get("decision", "exclude"),
                     row_values,
                 ]
             )
             audit_count += 1
+            excluded_count += 1
+    for mapping in field_mapping.get("mappings", []):
+        audit_sheet.append(
+            [
+                "字段映射",
+                mapping.get("source_file", ""),
+                mapping.get("source_sheet", ""),
+                mapping.get("source_header_row", "不适用"),
+                "不适用",
+                mapping.get("source_field", ""),
+                mapping.get("target_field", ""),
+                mapping.get("target_sheet", ""),
+                "confirmed",
+                json.dumps(
+                    {
+                        "mapping_rule": mapping.get("rule", ""),
+                        "mapping_confidence": mapping.get("confidence", ""),
+                    },
+                    ensure_ascii=False,
+                ),
+            ]
+        )
+        audit_count += 1
+    for anomaly in quality_impact.get("anomalies", []):
+        if anomaly.get("status") not in {"resolved", "ignored"}:
+            continue
+        audit_sheet.append(
+            [
+                f"质量处置:{anomaly.get('impact_level', '')}",
+                anomaly.get("dataset_path", "不适用"),
+                anomaly.get("details", {}).get("sheet_name", ""),
+                "不适用",
+                "不适用",
+                anomaly.get("title", ""),
+                anomaly.get("impact_on_conclusion", anomaly.get("impact", "")),
+                "不适用",
+                anomaly.get("status", ""),
+                anomaly.get("id", ""),
+            ]
+        )
+        audit_count += 1
     output_path.parent.mkdir(parents=True, exist_ok=True)
     workbook.save(output_path)
-    return written_groups, {"sheet_name": audit_sheet_name, "excluded_row_count": audit_count}
+    return written_groups, {
+        "sheet_name": audit_sheet_name,
+        "data_guide_sheet": guide_sheet_name,
+        "excluded_row_count": excluded_count,
+        "audit_entry_count": audit_count,
+    }
 
 
 def main() -> None:
     args = parse_args()
     input_paths = [Path(item).expanduser().resolve() for item in args.inputs]
-    output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(input_paths)
+    contract = load_confirmed_contract(args.goal_contract, args.execute)
+    original_field_mapping = (
+        load_confirmed_mapping(args.field_mapping, contract) if contract else {"mappings": []}
+    )
+    quality_impact = validate_quality_impact(args.quality_impact, contract) if args.execute else {}
+    output_path = Path(args.output).expanduser().resolve() if args.output else default_output_path(input_paths, contract)
     if any(output_path == path for path in input_paths):
         raise SystemExit("Output path must be different from every input path; original files are read-only.")
 
     sources = load_sources(input_paths, args.sheet)
+    if contract:
+        sources = [source for source in sources if source_in_scope(source, contract)]
+        if not sources:
+            raise SystemExit("目标契约指定的数据范围没有匹配到任何输入文件或工作表")
     if args.rules:
         profile = build_profile_from_rules(sources, Path(args.rules).expanduser().resolve())
     else:
@@ -1025,6 +1363,13 @@ def main() -> None:
             "input_paths": [str(path) for path in input_paths],
             "items": [build_item(source) for source in sources],
         }
+    field_mapping = (
+        normalize_field_mapping(original_field_mapping, profile, args.target_sheet)
+        if contract
+        else {"schema_version": "2.0", "mappings": []}
+    )
+    contract_gaps = apply_contract_projection(profile, contract, field_mapping) if contract else []
+    profile["contract_gaps"] = contract_gaps
     profile["sheet_groups"] = build_sheet_groups(profile)
     profile["blocking_issues"] = structure_issues(profile)
     add_lineage = not args.no_lineage
@@ -1077,10 +1422,14 @@ def main() -> None:
         "blocking_count": (
             len(blocking)
             + len(profile["blocking_issues"])
+            + len(contract_gaps)
             + int(bool(pending_candidates))
             + int(bool(candidate_validation_errors))
         ),
         "blocking_issues": profile["blocking_issues"],
+        "contract_gaps": contract_gaps,
+        "goal_id": contract.get("goal_id"),
+        "contract_fingerprint": contract.get("contract_fingerprint"),
         "exclusion_candidate_counts": exclusion_counts,
         "exclusion_confirmation_required": bool(pending_candidates),
         "candidate_validation_errors": candidate_validation_errors,
@@ -1106,14 +1455,20 @@ def main() -> None:
     }
 
     if args.profile_output:
-        Path(args.profile_output).write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        profile_output = Path(args.profile_output)
+        profile_output.parent.mkdir(parents=True, exist_ok=True)
+        profile_output.write_text(json.dumps(profile, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.rules_output:
-        Path(args.rules_output).write_text(json.dumps(rules, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        rules_output = Path(args.rules_output)
+        rules_output.parent.mkdir(parents=True, exist_ok=True)
+        rules_output.write_text(json.dumps(rules, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if args.run_output:
-        Path(args.run_output).write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        run_output = Path(args.run_output)
+        run_output.parent.mkdir(parents=True, exist_ok=True)
+        run_output.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     if args.execute:
-        if blocking or profile["blocking_issues"]:
+        if blocking or profile["blocking_issues"] or contract_gaps:
             raise SystemExit("Blocking structure issues remain; review dry-run output before executing.")
         if candidate_validation_errors:
             raise SystemExit("排除候选对应的源行已变化；请重新 dry-run 并让用户确认新的候选行。")
@@ -1142,12 +1497,16 @@ def main() -> None:
             add_lineage,
             merge_mode == "merge",
             merge_mode == "keep_separate",
+            contract,
+            field_mapping,
+            quality_impact,
         )
         summary["written"] = True
         summary["written_sheet_groups"] = written_groups
         summary["exclusion_audit"] = exclusion_audit
         if args.handoff_output:
             handoff_path = Path(args.handoff_output).expanduser().resolve()
+            handoff_path.parent.mkdir(parents=True, exist_ok=True)
             if args.rules:
                 confirmed_rules_path = Path(args.rules).expanduser().resolve()
             elif args.rules_output:
@@ -1160,26 +1519,30 @@ def main() -> None:
                     encoding="utf-8",
                 )
             handoff = {
-                "schema_version": "1.1",
+                "schema_version": "2.0",
                 "generated_at": datetime.now().astimezone().isoformat(),
                 "cleaning_status": "completed",
                 "analysis_gate": {
                     "status": "awaiting_user_confirmation",
                     "confirmed_at": None,
                 },
+                "goal_id": contract.get("goal_id"),
+                "goal_contract": contract,
+                "goal_contract_fingerprint": contract.get("contract_fingerprint"),
                 "analysis_goal_gate": {
-                    "status": "awaiting_confirmation",
-                    "confirmed_at": None,
-                    "goal": None,
-                    "decision_object": None,
-                    "focus": None,
-                    "output_depth": None,
+                    "status": "confirmed",
+                    "confirmed_at": contract.get("confirmed_at"),
+                    "goal": contract.get("goal"),
+                    "decision_object": contract.get("decision_object"),
+                    "focus": "",
+                    "output_depth": "标准",
                     "visualization_mode": "自动判定",
                     "report_format": "Markdown + HTML",
-                    "business_context": None,
-                    "analysis_sheets": [],
+                    "business_context": "",
+                    "analysis_sheets": [group["output_sheet"] for group in written_groups],
                 },
                 "cleaned_file_path": str(output_path),
+                "targeted_cleaning_file_path": str(output_path),
                 "sheet_name": args.target_sheet,
                 "cleaning_run_id": args.cleaning_run_id,
                 "rules": {
@@ -1192,6 +1555,10 @@ def main() -> None:
                 "lineage_columns": rules.get("output", {}).get("lineage_columns", []),
                 "output_sheets": written_groups,
                 "exclusion_audit": exclusion_audit,
+                "data_guide_sheet": exclusion_audit["data_guide_sheet"],
+                "field_mapping": field_mapping,
+                "original_field_mapping": original_field_mapping,
+                "quality_impact_summary": quality_impact.get("impact_summary", {}),
                 "excluded_rows": [
                     {
                         "source_file": item["source_file"],

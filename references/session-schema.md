@@ -3,7 +3,7 @@
 ## 1. 目录结构
 
 ```text
-.analysis-session/
+.data-session/goals/<goal-id>/analysis-session/
 ├── session.json
 ├── anomalies.json
 ├── chart-decision.json
@@ -33,6 +33,9 @@
   "business_context": "月度差旅费用复盘",
   "analysis_sheets": ["预存机票", "预存会员酒店"],
   "audience": "管理层",
+  "goal_id": "goal-20260607120000",
+  "goal_contract_path": ".data-session/goals/<goal-id>/goal-contract.json",
+  "goal_contract_fingerprint": "sha256:...",
   "active_run_id": "run-002",
   "active_checkpoint": "C",
   "open_anomaly_ids": ["anomaly_missing_revenue_001"],
@@ -85,6 +88,8 @@
 
 - `init`：创建目录、初始化 `session.json` 和 `anomalies.json`
 - 从清洗流程进入时，`init` 必须携带 `--goal-confirmed` 以及已确认的目标相关字段；否则不得进入画像。
+- 新流程还必须携带 `--goal-contract`，且分析目标必须与契约一致。
+- `dataset_path` 必须是当前目标的独立定向清洗文件，不得使用原始文件。
 - `merge-anomalies`：合并扫描结果，更新 `open_anomaly_ids`
 - `decide`：写入 decision record，更新异常状态
 - `start-run`：创建新 run ID

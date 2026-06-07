@@ -1,20 +1,23 @@
 # Cleaning to Analysis Handoff
 
-清洗阶段执行成功后生成 `.cleaning-session/handoff.json`，作为统一 skill 进入分析阶段的唯一标准交接入口。
+清洗阶段执行成功后生成 `.data-session/goals/<goal-id>/cleaning-session/handoff.json`，作为当前目标进入分析阶段的唯一标准交接入口。
 
 ```json
 {
-  "schema_version": "1.1",
+  "schema_version": "2.0",
   "generated_at": "2026-06-06T09:00:00+08:00",
   "cleaning_status": "completed",
+  "goal_id": "goal-20260607120000",
+  "goal_contract_fingerprint": "sha256:...",
+  "targeted_cleaning_file_path": "/data/销售_goal-001_定向清洗_20260607120000.xlsx",
   "analysis_gate": {
     "status": "awaiting_user_confirmation",
     "confirmed_at": null
   },
   "analysis_goal_gate": {
-    "status": "awaiting_confirmation",
-    "confirmed_at": null,
-    "goal": null,
+    "status": "confirmed",
+    "confirmed_at": "2026-06-07T12:00:00+08:00",
+    "goal": "定位收入下降的主要来源",
     "decision_object": null,
     "focus": null,
     "output_depth": null,
@@ -23,17 +26,39 @@
     "business_context": null,
     "analysis_sheets": []
   },
-  "cleaned_file_path": "/data/携程3月_清洗后.xlsx",
-  "sheet_name": "原始数据_清洗后",
+  "cleaned_file_path": "/data/销售_goal-001_定向清洗_20260607120000.xlsx",
+  "sheet_name": "目标数据",
   "cleaning_run_id": "run-001",
   "rules": {
     "status": "saved",
-    "path": "/data/.cleaning-session/rules.json",
+    "path": "/data/.data-session/goals/goal-001/cleaning-session/rules.json",
     "description": "本轮清洗实际采用的表头、数据范围和排除规则"
   },
-  "rules_path": "/data/.cleaning-session/rules.json",
+  "rules_path": "/data/.data-session/goals/goal-001/cleaning-session/rules.json",
   "source_files": ["/data/携程3月.xlsx"],
   "lineage_columns": ["源文件名", "源工作表名", "源行号"],
+  "field_mapping": {
+    "schema_version": "2.0",
+    "mappings": [
+      {
+        "source_file": "/data/携程3月.xlsx",
+        "source_sheet": "火车票",
+        "source_header_row": 3,
+        "source_field": "乘车人",
+        "target_field": "出行人",
+        "target_sheet": "目标数据"
+      }
+    ]
+  },
+  "original_field_mapping": {
+    "mappings": [
+      {
+        "sheet": "火车票",
+        "source_field": "乘车人",
+        "goal_field": "出行人"
+      }
+    ]
+  },
   "output_sheets": [
     {
       "output_sheet": "预存会员酒店",
@@ -49,7 +74,7 @@
     }
   ],
   "exclusion_audit": {
-    "sheet_name": "清洗排除记录",
+    "sheet_name": "清洗审计",
     "excluded_row_count": 3
   },
   "excluded_rows": [],
@@ -67,6 +92,7 @@
 不要把原始 JSON 字段直接展示给用户。交接报告使用以下业务语言：
 
 - `cleaned_file_path`：清洗后的数据文件
+- `targeted_cleaning_file_path`：当前目标唯一允许进入分析的数据文件
 - `sheet_name`：清洗结果所在工作表
 - `profile_summary.output_row_count`：清洗后保留的数据行数
 - `output_sheets`：每个输出 Tab 的各来源实际行数和合并总行数
@@ -75,7 +101,7 @@
 - `exclusion_audit`：清洗工作簿中的排除审计 Tab 及最终排除行数
 - `excluded_rows`：用户确认排除的来源行、类型、依据和原始内容
 - `analysis_gate.status == awaiting_user_confirmation`：已完成清洗，正在等待用户确认是否继续分析
-- `analysis_goal_gate.status == awaiting_confirmation`：清洗结果已确认，但分析目标尚未确认
+- `analysis_goal_gate.status == confirmed`：分析目标已在清洗前通过目标契约确认
 
 不要显示：
 
@@ -92,9 +118,8 @@
 - `cleaning_status` 必须为 `completed`。
 - 清洗执行完成后，`analysis_gate.status` 必须先是 `awaiting_user_confirmation`。
 - 只有用户明确确认后，才通过 `cleaning_store.py confirm-handoff` 改为 `confirmed`。
-- 清洗结果确认后，必须单独确认分析目标。
-- 只有执行 `cleaning_store.py confirm-analysis-goal` 后，`analysis_goal_gate.status` 才能改为 `confirmed`。
-- 分析阶段只接受清洗结果和分析目标均为 `confirmed` 的交接。
+- 分析目标必须在清洗前确认，交接文件不得创建待确认的新目标。
+- 分析阶段只接受清洗结果确认且目标契约已确认的交接。
 - `cleaned_file_path` 必须存在，且不得等于任一 `source_files`。
 - `cleaned_file_path` 对用户展示时必须使用绝对路径。
 - 单一输出 Tab 时使用 `sheet_name`；多 Tab 输出时使用 `output_sheets`，进入分析前由用户确认分析范围。
@@ -102,6 +127,9 @@
 - `rules_path` 指向本轮确认后的规则快照。
 - `warnings` 必须原样带入分析前提，不得静默丢弃。
 - `lineage_columns` 只用于追溯，不应默认作为业务维度或指标。
+- `field_mapping` 必须为规范化映射，来源文件、来源 Sheet 和来源表头行不得静默为空。
+- `original_field_mapping` 保留确认时的原始字段名和旧格式，用于审计追溯。
 - `analysis_goal_gate.analysis_sheets` 是用户确认的分析范围。
 - `analysis_goal_gate.visualization_mode` 是用户确认的图表模式，默认 `自动判定`。
 - `analysis_goal_gate.report_format` 是报告导出格式，支持 `Markdown`、`HTML`、`Markdown + HTML`。
+- `goal_id`、契约指纹和定向文件必须与分析会话完全一致。

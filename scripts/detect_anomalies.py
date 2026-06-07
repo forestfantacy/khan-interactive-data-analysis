@@ -19,6 +19,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("dataset", help="Path to a CSV or XLSX file")
     parser.add_argument("--sheet", help="Worksheet name for XLSX input")
     parser.add_argument("--profile", help="Existing profile JSON file")
+    parser.add_argument("--goal-contract", help="Confirmed goal-data contract JSON")
+    parser.add_argument("--field-mapping", help="Confirmed source-to-target field mapping JSON")
     parser.add_argument("--output", help="Write anomaly JSON to a file")
     parser.add_argument("--expected-start", help="Expected normal date range start, YYYY-MM-DD")
     parser.add_argument("--expected-end", help="Expected normal date range end, YYYY-MM-DD")
@@ -412,11 +414,108 @@ def detect_time_anomalies(
     return anomalies
 
 
+def load_goal_contract(path: Path | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    if contract.get("status") != "confirmed":
+        raise SystemExit("Goal contract must be confirmed before goal-related anomaly assessment")
+    return contract
+
+
+def load_field_mapping(path: Path | None, contract: dict[str, Any]) -> dict[str, Any]:
+    if not path:
+        return {"mappings": []}
+    mapping = json.loads(path.read_text(encoding="utf-8"))
+    if mapping.get("status") != "confirmed":
+        raise SystemExit("Field mapping must be confirmed before goal-related anomaly assessment")
+    if mapping.get("contract_fingerprint") != contract.get("contract_fingerprint"):
+        raise SystemExit("Field mapping does not match the goal contract")
+    return mapping
+
+
+def apply_standard_field_name(
+    anomaly: dict[str, Any],
+    field_mapping: dict[str, Any],
+    dataset_path: Path,
+    sheet_name: str,
+) -> dict[str, Any]:
+    details = anomaly.get("details", {})
+    source_field = details.get("field_name")
+    if not source_field:
+        return anomaly
+    for mapping in field_mapping.get("mappings", []):
+        if mapping.get("source_field") != source_field:
+            continue
+        if mapping.get("source_file") and mapping.get("source_file") not in {
+            str(dataset_path),
+            dataset_path.name,
+        }:
+            continue
+        mapping_sheet = mapping.get("source_sheet") or mapping.get("sheet")
+        if mapping_sheet and mapping_sheet != sheet_name:
+            continue
+        details["source_field_name"] = source_field
+        details["field_name"] = mapping.get("target_field") or mapping.get("goal_field") or source_field
+        anomaly["standard_field_name"] = details["field_name"]
+        break
+    return anomaly
+
+
+def classify_goal_impact(anomaly: dict[str, Any], contract: dict[str, Any]) -> dict[str, Any]:
+    field_name = anomaly.get("details", {}).get("field_name")
+    anomaly["affected_fields"] = [field_name] if field_name else []
+    anomaly["affected_goal_questions"] = contract.get("questions", [])
+    if not contract:
+        impact_level = "blocking" if anomaly["severity"] == "blocking" else "material"
+    else:
+        required_data = contract.get("required_data", {})
+        required = set(required_data.get("required_fields", []))
+        supporting = set(required_data.get("supporting_fields", []))
+        critical = required | set(required_data.get("join_keys", [])) | set(required_data.get("time_fields", []))
+        category = anomaly.get("category")
+        if field_name in critical:
+            impact_level = "blocking" if category in {"missing_value", "mixed_type", "time_gap"} else "material"
+        elif field_name in supporting:
+            impact_level = "limited"
+        elif category == "duplicate_row":
+            impact_level = "material" if required or supporting else "limited"
+            anomaly["affected_fields"] = sorted(critical | supporting)
+        else:
+            impact_level = "irrelevant"
+
+    anomaly["impact_level"] = impact_level
+    anomaly["severity"] = (
+        "blocking"
+        if impact_level == "blocking"
+        else "warning"
+        if impact_level in {"material", "limited"}
+        else "info"
+    )
+    anomaly["impact_on_conclusion"] = (
+        anomaly["impact"]
+        if impact_level != "irrelevant"
+        else "该问题位于当前目标契约之外，不影响本轮目标结论。"
+    )
+    anomaly["recommended_treatment"] = anomaly["recommended_action"]
+    anomaly["confidence_after_ignoring"] = {
+        "blocking": "low",
+        "material": "low",
+        "limited": "medium",
+        "irrelevant": "high",
+    }[impact_level]
+    anomaly["goal_id"] = contract.get("goal_id")
+    anomaly["contract_fingerprint"] = contract.get("contract_fingerprint")
+    return anomaly
+
+
 def main() -> None:
     args = parse_args()
     dataset_path = Path(args.dataset).expanduser().resolve()
     rows = load_rows(dataset_path, args.sheet)
     profile = load_profile(Path(args.profile) if args.profile else None, dataset_path, rows)
+    goal_contract = load_goal_contract(Path(args.goal_contract) if args.goal_contract else None)
+    field_mapping = load_field_mapping(Path(args.field_mapping) if args.field_mapping else None, goal_contract)
     sheet_name = args.sheet or dataset_path.stem
     expected_start = parse_expected_date(args.expected_start)
     expected_end = parse_expected_date(args.expected_end)
@@ -429,10 +528,23 @@ def main() -> None:
     anomalies.extend(detect_zero_and_mixed(profile, sheet_name))
     anomalies.extend(detect_outliers(rows, profile, sheet_name))
     anomalies.extend(detect_time_anomalies(rows, profile, sheet_name, expected_start, expected_end))
+    anomalies = [
+        classify_goal_impact(
+            apply_standard_field_name(anomaly, field_mapping, dataset_path, sheet_name),
+            goal_contract,
+        )
+        for anomaly in anomalies
+    ]
+    for anomaly in anomalies:
+        anomaly["dataset_path"] = str(dataset_path)
     payload = {
+        "schema_version": "2.0",
         "generated_at": datetime.now().astimezone().isoformat(),
         "dataset_path": str(dataset_path),
         "sheet_name": sheet_name,
+        "assessed_scopes": [{"file": str(dataset_path), "sheet": sheet_name}],
+        "goal_id": goal_contract.get("goal_id"),
+        "contract_fingerprint": goal_contract.get("contract_fingerprint"),
         "expected_time_range": {
             "start": expected_start.isoformat() if expected_start else None,
             "end": expected_end.isoformat() if expected_end else None,
@@ -442,10 +554,16 @@ def main() -> None:
             "column_count": profile["column_count"],
         },
         "anomalies": anomalies,
+        "impact_summary": {
+            level: sum(1 for anomaly in anomalies if anomaly.get("impact_level") == level)
+            for level in ("blocking", "material", "limited", "irrelevant")
+        },
     }
     output = json.dumps(payload, ensure_ascii=False, indent=2)
     if args.output:
-        Path(args.output).write_text(output + "\n", encoding="utf-8")
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(output + "\n", encoding="utf-8")
     print(output)
 
 

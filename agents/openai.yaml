@@ -1,4 +1,4 @@
 interface:
   display_name: "交互式业务数据清洗与分析"
-  short_description: "清洗并分析 Excel/CSV，全程可确认、回退和重跑"
-  default_prompt: "使用 $khan-interactive-data-analysis 清洗或分析这份 Excel/CSV，并在关键阶段等待我确认。"
+  short_description: "从目标首页选择或共创分析目标，独立清洗并持续分析"
+  default_prompt: "使用 $khan-interactive-data-analysis 侦察这些数据，展示数据能力和分类目标首页；我也可以自定义目标并与你多轮完善。每个目标独立清洗分析，完成后返回首页继续其他目标。"

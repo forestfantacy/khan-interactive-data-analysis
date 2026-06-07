@@ -1,292 +1,271 @@
 ---
 name: khan-interactive-data-analysis
-description: 交互式 Excel/CSV 业务数据清洗与分析 Skill。支持仅清洗、仅分析、先清洗再分析，以及恢复或回退已有会话。用于识别表头和真实数据区、确认清洗规则并输出新文件，也用于数据画像、异常确认、业务分析、图表判定和报告导出。适用于 Excel、CSV、经营报表、BI 明细表、数据库导出等需要可确认、可回退、可重跑和全程追溯的场景。
+description: 目标驱动的 Excel/CSV 复杂数据清洗与业务分析 Skill。先只读侦察多文件、多 Sheet、错位表头和字段差异，以目标首页展示数据能力和分类候选；支持通过多轮对话共创自定义目标。每个目标独立确认数据范围、生成定向清洗文件并分析，可随时返回首页、恢复或继续其他目标。
 ---
 
-# 交互式业务数据清洗与分析
+# 目标驱动的数据清洗与分析
 
-统一处理数据清洗和业务分析。根据用户意图进入清洗阶段、分析阶段或完整流程，不再依赖其他 skill。
+固定流程：
+
+`目标首页 → 选择候选或共创目标 → 目标契约 → 字段映射 → 质量确认 → 独立定向清洗文件 → 分析 → 返回首页`
 
 ## Core Rules
 
-1. 原始文件只读；清洗输出不得覆盖任一输入文件。
-2. 清洗正式写文件前必须完成 dry-run 和用户确认。
-3. 完整流程必须在清洗结果确认、分析目标确认两个节点分别停止并等待用户下一条消息。
-4. 正式分析前必须完成数据画像和异常闸门；阻断型异常未决时不得输出业务归因或建议。
-5. 清洗阶段不输出业务洞察，分析阶段不直接修补清洗结果。
-6. 用户不认可结果时必须回到对应检查点重跑，不允许只改输出文案或手工修改结果文件。
-7. 清洗状态写入 `.cleaning-session/`，分析状态写入 `.analysis-session/`。
-8. 所有需要用户回答的内容使用 [references/user-input-style.md](references/user-input-style.md) 的独立确认面板。
+1. 目标首页是流程起点和固定返回点；没有已确认目标，不执行正式清洗或分析。
+2. 用户可从任意阶段返回首页；当前目标保留并标记为 `paused`。
+3. 每个目标使用独立目录、契约、定向文件、清洗 run 和分析 run，不覆盖其他目标。
+4. 原始文件只读；分析只能读取当前目标的定向清洗文件。
+5. 用户不需要先整理文件、Sheet、表头或列；Skill 负责侦察、匹配和提出建议。
+6. 字段不一致本身不阻断；只有目标必需字段无法映射时才阻断。
+7. 数据问题按其对目标结论的影响处理；任何质量问题未确认时不得正式清洗。
+8. 用户输入自定义目标时必须先进入多轮共创，不得直接写成目标契约。
+9. 所有用户问题遵循 [references/user-input-style.md](references/user-input-style.md)，并提供“返回目标首页”。
 
-## Entry Routing
+## Workspace
 
-每轮先识别入口：
-
-- `Cleaning Only`：用户明确要求清洗、整理、合并或标准化原始 Excel/CSV。
-- `Analysis Only`：用户要求分析已有结构化文件，不要求先清洗。
-- `End-to-End`：用户要求“先清洗再分析”“完整流程”或从原始报表生成最终洞察。
-- `Resume Session`：数据目录存在 `.cleaning-session/` 或 `.analysis-session/`。
-- `Revise Decision`：用户质疑表头、范围、口径、异常或结论，要求回退重跑。
-- `Finalize Report`：当前分析 run 已被用户接受，需要导出最终报告。
-
-路由优先级：
-
-1. 用户明确要求回退或定稿时，优先执行该操作。
-2. 存在未完成会话时优先恢复，不重复初始化。
-3. 同时存在两个会话目录时：
-   - 新清洗 run 尚未确认，或其 `cleaning_run_id` 与当前分析前提不一致：恢复清洗阶段。
-   - 清洗交接已确认但分析未完成：恢复分析阶段。
-   - 两个阶段都已完成：按用户本轮明确意图路由。
-4. 没有会话时按用户意图选择 `Cleaning Only`、`Analysis Only` 或 `End-to-End`。
-
-## Cleaning Stage
-
-仅在 `Cleaning Only`、`End-to-End` 或清洗阶段恢复/回退时执行。
-
-详细流程、检查点和命令读取 [references/cleaning-workflow.md](references/cleaning-workflow.md)，会话结构读取 [references/cleaning-session-schema.md](references/cleaning-session-schema.md)。
-
-### Cleaning Invariants
-
-- 不固定表头或数据起始行，使用结构特征和连续数据区识别。
-- 多文件或多 sheet 字段不一致时必须阻断，除非用户提供明确规则。
-- 同名 Tab 只比较同名 Tab 的表头；表头一致时必须询问合并或分别保留。
-- dry-run 必须展示表头、数据区、排除候选、候选 ID、预计输出行数、置信度和识别依据。
-- 非空业务区行只能先标记为排除候选；用户确认 `exclude` 后才允许正式排除。
-- 正式执行前不得存在 `pending` 候选；源行内容变化时必须重新 dry-run 和确认。
-- 执行时使用已确认的 `.cleaning-session/rules.json`。
-- 成功后生成 `.cleaning-session/handoff.json`，并在输出工作簿写入 `清洗排除记录` Tab。
-
-初始化和 dry-run：
-
-```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py init \
-  --session-dir .cleaning-session \
-  --inputs <raw-file-or-files> \
-  --output <cleaned-output.xlsx> \
-  --target-sheet 原始数据_清洗后 \
-  --goal "<cleaning-goal>"
-
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/clean_tabular_data.py <raw-file-or-files> \
-  --output <cleaned-output.xlsx> \
-  --target-sheet 原始数据_清洗后 \
-  --profile-output .cleaning-session/profile.json \
-  --rules-output .cleaning-session/rules.json \
-  --run-output .cleaning-session/dry-run.json
+```text
+.data-session/
+├── session.json
+├── discovery.json
+├── capability-summary.json
+├── goal-catalog.json
+├── intent-sessions/
+└── goals/
+    └── <goal-id>/
+        ├── goal-contract.json
+        ├── field-mapping.json
+        ├── quality-impact.json
+        ├── cleaning-session/
+        └── analysis-session/
 ```
 
-按 [templates/cleaning-review-template.md](templates/cleaning-review-template.md) 展示结果。用户确认规则后才允许执行。
+根目录下的 `goal-contract.json`、`field-mapping.json` 和 `quality-impact.json` 只是活动目标的兼容镜像；规范数据位于 `goals/<goal-id>/`。
 
-用户接受全部排除建议时运行：
+## Phase 1: Discovery And Goal Home
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py confirm-exclusions \
-  --session-dir .cleaning-session \
-  --accept-suggested
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/profile_dataset.py <file-or-files> \
+  --all-sheets \
+  --output .data-session/discovery.json
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py init \
+  --session-dir .data-session \
+  --discovery .data-session/discovery.json
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py show-home \
+  --session-dir .data-session
 ```
 
-用户逐项调整时，使用 `--exclude <candidate-id...>` 和 `--keep <candidate-id...>` 写回决策。不得替用户确认未明确同意的排除候选。
+首页按 [templates/goal-home-template.md](templates/goal-home-template.md) 展示：
 
-### Cleaning Result Gate
+- 文件、Sheet、行数、时间覆盖、指标、维度、标识字段和跨表能力。
+- 可可靠分析、受限分析和暂不支持的范围。
+- 根据实际数据动态生成的类别；每个类别展示 3 至 5 个候选。
+- 每个候选的决策价值、支持结论、不能支持的结论、数据要求、缺口、置信度和清洗成本。
+- 候选标题必须使用用户容易理解的业务问题表达；分析方法和原始字段名分别放入详情与数据依据，不用技术动作充当目标。
+- 进行中、暂停、受阻和已完成目标。
+- 自定义目标、恢复目标、刷新侦察等入口。
 
-清洗文件写出后，本轮必须停止。向用户报告：
+候选不足时允许补充 `limited` 或 `blocked` 目标，但必须明确限制。不得用仅标题不同的候选凑数量。
 
-- 清洗后文件绝对路径
-- 输出工作表列表
-- 每个输出 Tab 的来源行数和合并总行数
-- 原文件未修改
-- 规则已记录
-- warning 摘要
-- `清洗排除记录` Tab 和最终排除行数
-
-然后要求用户选择确认并继续分析、返回调整规则或暂停。即使用户最初要求完整流程，也不得在同一轮自动进入分析。
-
-用户下一条消息确认后运行：
+选择目录候选：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py confirm-handoff \
-  --session-dir .cleaning-session
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py select-goal \
+  --session-dir .data-session \
+  --candidate-id <candidate-id> \
+  --goal-id <goal-id>
 ```
 
-`Cleaning Only` 到此完成。`End-to-End` 继续进入分析目标确认。
+## Phase 2: Custom Goal Co-creation
 
-### Analysis Goal Gate
+用户输入自由文本目标时读取 [templates/custom-goal-dialog-template.md](templates/custom-goal-dialog-template.md)。
 
-清洗结果确认后，单独展示并确认：
-
-- 分析目标
-- 决策对象 / 报告使用者
-- 重点关注指标或异常
-- 输出深度：简要 / 标准 / 深入
-- 图表模式：自动判定 / 不出图 / 需要图表
-- 报告格式：Markdown / HTML / Markdown + HTML
-- 业务背景
-- 分析 Tab 范围
-
-本轮再次停止，不执行数据画像。用户在后续消息确认后运行：
+创建意图会话：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py confirm-analysis-goal \
-  --session-dir .cleaning-session \
-  --goal "<analysis-goal>" \
-  --decision-object "<decision-object>" \
-  --focus "<focus>" \
-  --output-depth <简要|标准|深入> \
-  --visualization-mode <自动判定|不出图|需要图表> \
-  --report-format "<Markdown|HTML|Markdown + HTML>" \
-  --business-context "<business-context>" \
-  --analysis-sheets <sheet-1> <sheet-2>
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py start-intent \
+  --session-dir .data-session \
+  --raw-input "<user-original-input>"
 ```
 
-只有 `analysis_gate.status == "confirmed"` 且 `analysis_goal_gate.status == "confirmed"` 才能进入分析。
+每轮：
 
-## Analysis Stage
+1. 保留用户原话。
+2. 结合数据能力更新已理解信息。
+3. 只追问会改变分析方案的缺口，每轮最多 3 个问题。
+4. 不询问能从文件或历史回答中推断的信息。
+5. 允许用户纠正、跳过、直接生成候选或返回首页。
 
-仅在 `Analysis Only`、已通过两个确认点的 `End-to-End`，或分析阶段恢复/回退时执行。
+最低可执行条件：
 
-### Phase 1: Intake
+- 核心问题明确。
+- 关注对象、指标或问题范围明确。
+- 决策用途或期望输出明确。
+- 当前数据至少支持一个可执行方向。
 
-直接分析已有文件时，一次性确认：
-
-- 数据文件路径与分析 Tab
-- 分析目标
-- 决策对象 / 报告使用者
-- 业务背景
-- 重点关注指标或异常
-- 输出深度、图表模式和报告格式
-
-信息不足时先补齐目标和业务背景，不直接计算。目标确认后初始化：
+Agent 将本轮理解写入 `--known`：
 
 ```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py update-intent \
+  --session-dir .data-session \
+  --raw-input "<latest-user-message>" \
+  --known '<json-object>' \
+  --assumptions '<json-list>' \
+  --data-matches '<json-list>' \
+  --data-gaps '<json-list>'
+```
+
+达到最低条件后，先展示并确认意图总结：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py summarize-intent \
+  --session-dir .data-session \
+  --summary "<confirmed-intent-summary>" \
+  --confirmed
+```
+
+再生成 3 至 5 个候选：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py generate-custom-candidates \
+  --session-dir .data-session
+```
+
+自定义候选围绕同一核心意图，从现状趋势、结构贡献、异常风险、驱动归因、行动监控等角度区分。用户可选择、要求重生成、继续完善，或组合两个候选：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py combine-custom-candidates \
+  --session-dir .data-session \
+  --candidate-id <candidate-1> <candidate-2>
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py create-custom-goal \
+  --session-dir .data-session \
+  --intent-id <intent-id> \
+  --candidate-id <candidate-id> \
+  --goal-id <goal-id>
+```
+
+## Phase 3: Goal Contract, Mapping And Quality
+
+活动目标目录记为：
+
+```text
+GOAL_DIR=.data-session/goals/<goal-id>
+```
+
+目标契约必须包含目标问题、决策对象、文件和 Sheet 范围、必需字段、辅助字段、关联键、时间字段、假设和数据缺口。
+
+确认字段映射：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py confirm-mapping \
+  --session-dir .data-session \
+  --mappings '<json-list-or-file>'
+```
+
+字段映射格式和旧格式兼容规则读取 [references/field-mapping-schema.md](references/field-mapping-schema.md)。来源文件或 Sheet 无法唯一推断时必须停止，不得生成来源为空的审计记录。
+
+针对目标范围检测异常：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/detect_anomalies.py <dataset> \
+  --sheet <sheet> \
+  --profile <profile.json> \
+  --goal-contract "$GOAL_DIR/goal-contract.json" \
+  --field-mapping "$GOAL_DIR/field-mapping.json" \
+  --output <quality-scan.json>
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py save-quality \
+  --session-dir .data-session \
+  --input <quality-scan.json>
+```
+
+影响级别：
+
+- `blocking`：必须修复、补数据或调整目标。
+- `material`：可能改变趋势、排名或归因，逐项确认。
+- `limited`：局部影响，分组确认。
+- `irrelevant`：汇总后批量确认忽略。
+
+## Phase 4: Targeted Cleaning
+
+清洗会话位于 `$GOAL_DIR/cleaning-session/`。读取 [references/cleaning-workflow.md](references/cleaning-workflow.md)，完成 dry-run 和确认后执行：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py set-goal-status \
+  --session-dir .data-session --status cleaning
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/clean_tabular_data.py <raw-files> \
+  --output <targeted-output.xlsx> \
+  --target-sheet 目标数据 \
+  --goal-contract "$GOAL_DIR/goal-contract.json" \
+  --field-mapping "$GOAL_DIR/field-mapping.json" \
+  --quality-impact "$GOAL_DIR/quality-impact.json" \
+  --rules "$GOAL_DIR/cleaning-session/rules.json" \
+  --run-output "$GOAL_DIR/cleaning-session/run-summary.json" \
+  --handoff-output "$GOAL_DIR/cleaning-session/handoff.json" \
+  --cleaning-run-id <run-id> \
+  --execute
+```
+
+每个目标生成独立文件，包含目标数据、`数据说明` 和 `清洗审计`。文件生成后必须停止并等待确认。
+
+## Phase 5: Analysis And Completion
+
+分析会话位于 `$GOAL_DIR/analysis-session/`：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py set-goal-status \
+  --session-dir .data-session --status analyzing
+
 python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py init \
-  --session-dir .analysis-session \
-  --dataset <dataset-path> \
+  --session-dir "$GOAL_DIR/analysis-session" \
+  --dataset <targeted-cleaning-file.xlsx> \
   --goal "<confirmed-goal>" \
   --goal-confirmed \
-  --decision-object "<decision-object>" \
-  --focus "<focus>" \
-  --output-depth <简要|标准|深入> \
-  --visualization-mode <自动判定|不出图|需要图表> \
-  --report-format <Markdown|HTML|Markdown + HTML> \
-  --business-context "<business-context>" \
-  --analysis-sheets <sheet-1> <sheet-2> \
-  --audience "<audience>"
+  --goal-contract "$GOAL_DIR/goal-contract.json" \
+  --analysis-sheets <target-sheets>
 ```
 
-从清洗阶段进入时，读取 [references/cleaning-handoff-schema.md](references/cleaning-handoff-schema.md) 并验证：
+分析严格围绕目标契约；不能支持的问题必须明确标为“当前无法回答”。
 
-- 清洗、清洗结果确认、分析目标确认均已完成。
-- `cleaned_file_path` 存在且不等于任一源文件。
-- 分析范围严格使用 `analysis_goal_gate.analysis_sheets`。
-- 清洗 run、规则、warning 和追溯字段写入分析 run 前提。
-- 追溯字段默认不作为业务指标或分析维度。
-
-### Phase 2: Dataset Profiling
-
-对每个已确认的分析 Tab 运行：
+目标完成后保存摘要和产物，并自动返回首页：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/profile_dataset.py <dataset-path> \
-  --sheet <sheet-name> \
-  --output .analysis-session/profile.json
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py complete-goal \
+  --session-dir .data-session \
+  --summary "<conclusion-summary>" \
+  --targeted-files '<json-list>' \
+  --report-files '<json-list>'
 ```
 
-让用户确认每行含义、粒度、时间范围、关键字段和口径歧义。这一步不输出最终结论。详细规则读取 [references/interaction-protocol.md](references/interaction-protocol.md)。
+首页保留已完成目标，支持查看、恢复重跑或派生新目标。
 
-### Phase 3: Anomaly Gate
+## Navigation
 
-业务正常时间范围未确认时必须先询问，不得直接把数据最小/最大日期视为正常范围。
+任意阶段返回首页：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/detect_anomalies.py <dataset-path> \
-  --sheet <sheet-name> \
-  --profile .analysis-session/profile.json \
-  --expected-start <YYYY-MM-DD-if-confirmed> \
-  --expected-end <YYYY-MM-DD-if-confirmed> \
-  --output .analysis-session/anomaly-scan.json
-
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py merge-anomalies \
-  --session-dir .analysis-session \
-  --input .analysis-session/anomaly-scan.json
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py return-home \
+  --session-dir .data-session \
+  --reason "<reason>"
 ```
 
-按 [templates/anomaly-review-template.md](templates/anomaly-review-template.md) 逐项展示 `blocking` 和 `warning`，要求用户确认处理、忽略、提供规则或补充数据。异常分类读取 [references/anomaly-taxonomy.md](references/anomaly-taxonomy.md)。
-
-### Phase 4: Chart Decision
-
-异常决策完成后读取 [references/chart-decision-rules.md](references/chart-decision-rules.md) 并运行：
+恢复目标：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/decide_charts.py \
-  --profile .analysis-session/profile.json \
-  --anomalies .analysis-session/anomalies.json \
-  --goal "<confirmed-goal>" \
-  --focus "<confirmed-focus>" \
-  --output-depth <简要|标准|深入> \
-  --visualization-mode <自动判定|不出图|需要图表> \
-  --sheet "<sheet-name>" \
-  --output .analysis-session/chart-decision.json
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py resume-goal \
+  --session-dir .data-session \
+  --goal-id <goal-id>
 ```
 
-图表写入 `.analysis-session/charts/`。数量上限为简要 2 张、标准 5 张、深入 10 张，允许 0 张；每张图必须解释业务含义。
-
-### Phase 5: Formal Analysis
-
-异常闸门通过后读取 [references/original-sop.md](references/original-sop.md)，再启动分析 run：
+基于已有目标派生：
 
 ```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py start-run \
-  --session-dir .analysis-session
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_store.py derive-goal \
+  --session-dir .data-session \
+  --parent-goal-id <goal-id>
 ```
 
-输出必须说明推断字段、已忽略异常、用户自定义规则，以及适用时的清洗 run、规则、输出文件、分析 Tab 和追溯字段。
-
-### Phase 6: Reconciliation
-
-用户质疑结果时先识别责任阶段：
-
-- 表头、数据范围、字段标准化、合并或排除行：回退清洗检查点 `B/C/D`。
-- 字段业务含义、指标口径、异常处理或结论：回退分析检查点 `B/C/D`。
-
-使用对应 store 的 `invalidate`，重跑受影响阶段。清洗重跑后，必须用 `session_store.py invalidate` 将旧分析 run 标为 `superseded`，并基于新 `handoff.json` 启动分析。
-
-分析重跑后生成差异摘要：
-
-```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/summarize_run_diff.py \
-  --session-dir .analysis-session \
-  --format markdown
-```
-
-检查点与失效规则读取 [references/cleaning-session-schema.md](references/cleaning-session-schema.md) 和 [references/session-schema.md](references/session-schema.md)。
-
-### Phase 7: Finalize
-
-只有用户接受当前分析 run 后才生成最终报告。使用 [templates/final-report-template.md](templates/final-report-template.md)，并附带：
-
-- 关键假设、已忽略异常、置信度和待补充数据
-- 图表判定结果、实际图表和未出图原因
-- 原始文件、清洗后文件、清洗 run、分析 run、清洗规则和 warning
-
-先写入 `.analysis-session/final-report.md`，再导出：
-
-```bash
-python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/export_report.py \
-  .analysis-session/final-report.md \
-  --output-dir .analysis-session/exports \
-  --basename business-analysis-report \
-  --format "<Markdown|HTML|Markdown + HTML>" \
-  --title "<report-title>"
-```
-
-最终回复列出所有导出文件的绝对路径。
-
-## Resource Map
-
-- 清洗流程：[references/cleaning-workflow.md](references/cleaning-workflow.md)
-- 清洗会话：[references/cleaning-session-schema.md](references/cleaning-session-schema.md)
-- 阶段交接：[references/cleaning-handoff-schema.md](references/cleaning-handoff-schema.md)
-- 分析交互协议：[references/interaction-protocol.md](references/interaction-protocol.md)
-- 分析会话：[references/session-schema.md](references/session-schema.md)
-- 异常分类：[references/anomaly-taxonomy.md](references/anomaly-taxonomy.md)
-- 图表规则：[references/chart-decision-rules.md](references/chart-decision-rules.md)
-- 原分析 SOP：[references/original-sop.md](references/original-sop.md)
+目标、范围、映射或质量决定变化时，按上游到下游顺序使旧产物失效，不得直接改报告文案。

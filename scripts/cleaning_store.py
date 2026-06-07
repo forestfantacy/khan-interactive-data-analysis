@@ -65,6 +65,9 @@ def cmd_init(args: argparse.Namespace) -> None:
     session_path, profile_path, rules_path, runs_dir = session_paths(session_dir)
     input_paths = [Path(item).expanduser().resolve() for item in args.inputs]
     output_path = Path(args.output).expanduser().resolve() if args.output else None
+    goal_contract = read_json(Path(args.goal_contract).expanduser().resolve(), {}) if args.goal_contract else {}
+    if args.goal_contract and goal_contract.get("status") != "confirmed":
+        raise SystemExit("Goal contract must be confirmed before initializing a cleaning session")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
     session = {
         "session_id": f"cleaning_session_{timestamp}",
@@ -73,6 +76,9 @@ def cmd_init(args: argparse.Namespace) -> None:
         "output_path": str(output_path) if output_path else None,
         "target_sheet": args.target_sheet,
         "cleaning_goal": args.goal,
+        "goal_id": goal_contract.get("goal_id"),
+        "goal_contract_path": str(Path(args.goal_contract).expanduser().resolve()) if args.goal_contract else None,
+        "goal_contract_fingerprint": goal_contract.get("contract_fingerprint"),
         "current_phase": "Phase A: Cleaning Goal",
         "active_checkpoint": "A",
         "active_run_id": None,
@@ -355,6 +361,7 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--output")
     init.add_argument("--target-sheet", default="原始数据_清洗后")
     init.add_argument("--goal", required=True)
+    init.add_argument("--goal-contract")
     init.set_defaults(func=cmd_init)
 
     show = subparsers.add_parser("show")
