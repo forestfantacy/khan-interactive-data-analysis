@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import base64
 import html
+import json
 import mimetypes
 import re
 import shutil
@@ -25,6 +26,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--title", help="HTML document title")
     parser.add_argument("--no-embed-assets", action="store_true")
+    parser.add_argument(
+        "--chart-decision",
+        help="Confirmed chart decision JSON required by the analysis workflow",
+    )
     return parser.parse_args()
 
 
@@ -217,6 +222,11 @@ def main() -> None:
     args = parse_args()
     source = Path(args.input).expanduser().resolve()
     output_dir = Path(args.output_dir).expanduser().resolve()
+    if args.chart_decision:
+        decision_path = Path(args.chart_decision).expanduser().resolve()
+        decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        if decision.get("status") != "confirmed":
+            raise SystemExit("Chart decision must be confirmed before exporting the final report")
     output_dir.mkdir(parents=True, exist_ok=True)
     markdown = source.read_text(encoding="utf-8")
     outputs = []
@@ -238,7 +248,7 @@ def main() -> None:
         outputs.append(str(html_output))
 
     print(
-        __import__("json").dumps(
+        json.dumps(
             {"format": args.format, "outputs": outputs, "assets_embedded": not args.no_embed_assets},
             ensure_ascii=False,
             indent=2,

@@ -71,6 +71,8 @@
 - `report_sections`
 - `status`
 
+`chart_decision.status` 只能为 `pending_confirmation` 或 `confirmed`。渲染和最终导出只接受 `confirmed`；`chart_files` 保存成功 PNG 的绝对路径，`chart_failures` 保存未生成项及原因。
+
 ## 5. 检查点
 
 - `A`：分析目标与业务背景
@@ -95,5 +97,7 @@
 - `start-run`：创建新 run ID
 - `save-run`：保存当前 run 结果
 - `invalidate`：记录回退原因并将下游 run 标记为 `superseded`
+
+图表候选由 `decide_charts.py` 生成并经用户确认，`render_charts.py --run-file` 将最终决定、成功文件和失败原因回写当前 run。
 
 最终导出文件必须记录绝对路径，并写入 run 的 `report_files`。

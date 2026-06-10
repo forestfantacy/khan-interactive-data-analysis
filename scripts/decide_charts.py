@@ -26,6 +26,17 @@ def parse_args() -> argparse.Namespace:
         default="自动判定",
     )
     parser.add_argument("--sheet", default="未指定")
+    parser.add_argument(
+        "--selected-chart",
+        action="append",
+        default=[],
+        help="Confirmed chart candidate ID; repeat for multiple charts",
+    )
+    parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="Mark the decision as user-confirmed; no selected IDs means no charts",
+    )
     parser.add_argument("--output", help="Write chart decision JSON")
     return parser.parse_args()
 
@@ -167,7 +178,7 @@ def build_candidates(
                 title=f"Tab「{sheet_name}」{metric_fields[0]}结构构成",
                 chart_type="堆叠柱状图",
                 question=f"{metric_fields[0]}由哪些{dimension_fields[0]}构成？",
-                fields=fields,
+                fields=([time_fields[0]] if time_fields else []) + fields,
                 direct=goal_hits(intent, ("结构", "构成", "占比", "贡献", "集中")),
                 supports_action=True,
                 readable=row_count >= 2,
@@ -244,22 +255,43 @@ def main() -> None:
     profile = read_json(args.profile, {})
     anomalies = read_json(args.anomalies, {"anomalies": []})
     candidates = build_candidates(profile, anomalies, args.goal, args.focus, args.sheet)
-    selected = select_candidates(candidates, args.visualization_mode, args.output_depth)
+    recommended = select_candidates(candidates, args.visualization_mode, args.output_depth)
+    candidate_map = {candidate["id"]: candidate for candidate in candidates}
+    unknown_ids = [candidate_id for candidate_id in args.selected_chart if candidate_id not in candidate_map]
+    if unknown_ids:
+        raise SystemExit(f"Unknown chart candidate IDs: {', '.join(unknown_ids)}")
+    if args.confirm and args.visualization_mode == "不出图" and args.selected_chart:
+        raise SystemExit("Visualization mode is 不出图; confirmed selection must be empty")
+    if args.confirm and len(set(args.selected_chart)) > DEPTH_LIMITS[args.output_depth]:
+        raise SystemExit(f"Confirmed selection exceeds the {args.output_depth} chart limit")
+    selected = (
+        [candidate_map[candidate_id] for candidate_id in dict.fromkeys(args.selected_chart)]
+        if args.confirm
+        else recommended
+    )
+    status = "confirmed" if args.confirm or args.visualization_mode == "不出图" else "pending_confirmation"
     payload = {
         "generated_at": datetime.now().astimezone().isoformat(),
+        "status": status,
+        "sheet": args.sheet,
         "visualization_mode": args.visualization_mode,
         "output_depth": args.output_depth,
         "chart_limit": DEPTH_LIMITS[args.output_depth],
         "should_create_charts": bool(selected),
         "selected_chart_count": len(selected),
         "selected_charts": selected,
+        "recommended_chart_ids": [candidate["id"] for candidate in recommended],
         "all_candidates": candidates,
         "decision_summary": (
-            "用户已选择不出图。"
+            "用户已确认不出图。"
+            if status == "confirmed" and not selected
+            else f"用户已确认生成 {len(selected)} 张关键图表。"
+            if args.confirm
+            else "用户已选择不出图。"
             if args.visualization_mode == "不出图"
-            else f"建议生成 {len(selected)} 张关键图表。"
+            else f"建议生成 {len(selected)} 张关键图表，等待用户确认。"
             if selected
-            else "没有候选图表达到当前模式的出图标准，不为凑数量出图。"
+            else "没有候选图表达到当前模式的出图标准，等待用户确认是否增选。"
         ),
     }
     output = json.dumps(payload, ensure_ascii=False, indent=2)

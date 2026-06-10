@@ -934,6 +934,11 @@ def cmd_complete_goal(args: argparse.Namespace) -> None:
     session_dir = Path(args.session_dir)
     state = load_state(session_dir)
     goal_id = active_goal_id(state, args.goal_id)
+    analysis_dir = goal_dir(session_dir, goal_id) / "analysis-session"
+    if analysis_dir.exists():
+        chart_decision = read_json(analysis_dir / "chart-decision.json", {})
+        if chart_decision.get("status") != "confirmed":
+            raise SystemExit("Chart decision must be confirmed before completing the goal")
     record = state["goals"][goal_id]
     record.update(
         {

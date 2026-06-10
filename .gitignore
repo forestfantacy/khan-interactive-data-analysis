@@ -4,3 +4,5 @@ __pycache__/
 .cleaning-session/
 .analysis-session/
 .data-session/
+.learnings/
+data-session/

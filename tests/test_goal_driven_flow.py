@@ -399,6 +399,38 @@ class GoalDrivenFlowTest(unittest.TestCase):
             self.assertEqual(analysis_state["goal_id"], "goal-revenue")
             self.assertEqual(analysis_state["dataset_path"], str(output.resolve()))
 
+            goal_analysis_dir = data_session / "goals" / "goal-revenue" / "analysis-session"
+            goal_analysis_dir.mkdir(parents=True)
+            blocked_completion = subprocess.run(
+                [
+                    "python3",
+                    str(SCRIPTS / "data_session_store.py"),
+                    "complete-goal",
+                    "--session-dir",
+                    str(data_session),
+                    "--summary",
+                    "收入分析完成",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(blocked_completion.returncode, 0)
+            self.assertIn("Chart decision must be confirmed", blocked_completion.stderr)
+            (goal_analysis_dir / "chart-decision.json").write_text(
+                json.dumps({"status": "confirmed", "selected_charts": []}),
+                encoding="utf-8",
+            )
+            completed_goal = run_script(
+                "data_session_store.py",
+                "complete-goal",
+                "--session-dir",
+                str(data_session),
+                "--summary",
+                "收入分析完成",
+            )
+            self.assertEqual(completed_goal["completed_goal"]["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

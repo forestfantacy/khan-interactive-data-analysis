@@ -230,6 +230,71 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py
 
 分析严格围绕目标契约；不能支持的问题必须明确标为“当前无法回答”。
 
+完成核心分析计算后、生成最终报告前，必须先生成图表候选：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/profile_dataset.py \
+  <targeted-cleaning-file.xlsx> \
+  --sheet <target-sheet> \
+  --output "$GOAL_DIR/analysis-session/profile.json"
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/decide_charts.py \
+  --profile "$GOAL_DIR/analysis-session/profile.json" \
+  --anomalies "$GOAL_DIR/analysis-session/anomalies.json" \
+  --goal "<confirmed-goal>" \
+  --focus "<analysis-focus>" \
+  --output-depth <简要|标准|深入> \
+  --visualization-mode <自动判定|不出图|需要图表> \
+  --sheet <target-sheet> \
+  --output "$GOAL_DIR/analysis-session/chart-decision.json"
+```
+
+除 `不出图` 模式外，必须展示图表确认面板后暂停，不能直接渲染或完成目标。面板按推荐项预选，并列出：
+
+- 图名、类型、回答的问题、使用字段和评分。
+- 推荐项及数量上限。
+- 确认推荐项、增删候选、全部不出图、返回目标首页。
+
+用户确认后，使用最终选择重新写入已确认的决定；不传 `--selected-chart` 表示确认全部不出图：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/decide_charts.py \
+  --profile "$GOAL_DIR/analysis-session/profile.json" \
+  --anomalies "$GOAL_DIR/analysis-session/anomalies.json" \
+  --goal "<confirmed-goal>" \
+  --focus "<analysis-focus>" \
+  --output-depth <简要|标准|深入> \
+  --visualization-mode <自动判定|不出图|需要图表> \
+  --sheet <target-sheet> \
+  --confirm \
+  --selected-chart <candidate-id> \
+  --output "$GOAL_DIR/analysis-session/chart-decision.json"
+```
+
+开始分析 run 后渲染已确认图表：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py start-run \
+  --session-dir "$GOAL_DIR/analysis-session" \
+  --checkpoint D
+
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/render_charts.py \
+  --dataset <targeted-cleaning-file.xlsx> \
+  --decision "$GOAL_DIR/analysis-session/chart-decision.json" \
+  --output-dir "$GOAL_DIR/analysis-session/charts" \
+  --run-file "$GOAL_DIR/analysis-session/runs/<run-id>.json"
+```
+
+将每张成功图表嵌入对应的分析章节，并在“图表判定”和附件中记录绝对路径。单张失败不阻断其他图表或分析结论，但报告必须披露失败项和原因。未生成 `status: confirmed` 的 `chart-decision.json` 时不得导出最终报告或完成目标。
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/export_report.py \
+  "$GOAL_DIR/analysis-session/final-report.md" \
+  --output-dir "$GOAL_DIR/analysis-session/exports" \
+  --format <Markdown|HTML|Markdown + HTML> \
+  --chart-decision "$GOAL_DIR/analysis-session/chart-decision.json"
+```
+
 目标完成后保存摘要和产物，并自动返回首页：
 
 ```bash
