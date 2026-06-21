@@ -334,3 +334,52 @@ python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/data_session_sto
 ```
 
 目标、范围、映射或质量决定变化时，按上游到下游顺序使旧产物失效，不得直接改报告文案。
+
+## Revise Decision
+
+用户质疑任何已确认决策时触发（例如"这个字段映射不对"、"这个排除行不该排掉"、"异常不该忽略"、"指标口径换一下"、"从 XX 步重做"）。
+
+**检查点映射**
+
+| 用户质疑内容 | 层 | 回退检查点 | 下游受影响内容 |
+|---|---|---|---|
+| 分析目标、分析范围、业务背景 | 分析 | A | B、C、D（图表和报告） |
+| 指标口径、粒度、关注维度 | 分析 | B | C、D（图表和报告） |
+| 异常处置决策、某条异常是否纳入 | 分析 | C | D（图表和报告） |
+| 字段映射、来源 Sheet 或文件范围 | 清洗 | B | C、D、E（定向清洗文件）+ 分析会话 |
+| 表头识别、数据区范围、排除行 | 清洗 | C | D、E（定向清洗文件）+ 分析会话 |
+| 质量处置决策、某条异常是否排除 | 清洗 | D | E（定向清洗文件）+ 分析会话 |
+
+**流程**
+
+1. 确认检查点后，向用户列出将失效的内容，等待用户确认再执行。
+2. 清洗层回退：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/cleaning_store.py invalidate \
+  --session-dir "$GOAL_DIR/cleaning-session" \
+  --checkpoint <A|B|C|D|E> \
+  --reason "<reason>"
+```
+
+3. 分析层回退：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py invalidate \
+  --session-dir "$GOAL_DIR/analysis-session" \
+  --checkpoint <A|B|C|D> \
+  --reason "<reason>"
+```
+
+4. **清洗回退的跨会话级联**：若清洗 A/B/C/D 被回退，且 `$GOAL_DIR/analysis-session/session.json` 已存在，则额外调用：
+
+```bash
+python3 ~/.claude/skills/khan-interactive-data-analysis/scripts/session_store.py invalidate \
+  --session-dir "$GOAL_DIR/analysis-session" \
+  --checkpoint A \
+  --reason "cleaning rules changed, analysis must rerun"
+```
+
+   并告知用户：定向清洗文件已失效，分析将基于新的清洗结果重跑。
+
+5. 从该检查点重新走对应阶段流程（重新 dry-run、重新确认排除行、重新处理异常等）。
